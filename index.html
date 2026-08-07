@@ -1,0 +1,2620 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Cache Inspector - find the exact byte where your Anthropic prompt cache broke</title>
+<meta name="description" content="Paste two consecutive Anthropic Messages request bodies and find the exact byte where your cached prefix broke, whether your breakpoints are legal, and whether caching pays for itself at your request rate. Runs entirely in your browser.">
+<link rel="canonical" href="https://0xelitesystem.github.io/prompt-cache-inspector/">
+<meta property="og:title" content="Prompt Cache Inspector - find the exact byte where your Anthropic prompt cache broke">
+<meta property="og:description" content="Paste two consecutive Anthropic Messages request bodies and find the exact byte where your cached prefix broke, whether your breakpoints are legal, and whether caching pays for itself at your request rate.">
+<meta property="og:url" content="https://0xelitesystem.github.io/prompt-cache-inspector/">
+<meta property="og:type" content="website">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"Prompt Cache Inspector","description":"Client-side inspector for Anthropic prompt caching. Diffs two request bodies in provider render order, locates the exact byte where the cached prefix broke, audits cache_control breakpoint legality, checks the 20-block lookback window, models the TTL clock, and derives cache break-even from an editable rates table.","url":"https://0xelitesystem.github.io/prompt-cache-inspector/","applicationCategory":"DeveloperApplication","operatingSystem":"Any browser","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"elitesystem.ai","url":"https://elitesystem.ai"}}
+</script>
+<script>
+(function () {
+  try {
+    var saved = window.localStorage.getItem('pci-theme');
+    if (saved === 'light' || saved === 'dark') {
+      document.documentElement.setAttribute('data-theme', saved);
+      return;
+    }
+  } catch (e) { /* storage blocked; fall through to the dark default */ }
+  document.documentElement.setAttribute('data-theme', 'dark');
+})();
+</script>
+<style>
+:root{
+  --bg:#0b0f14; --panel:#111820; --panel2:#0d131a; --line:#1e2a36; --line2:#2b3b4b;
+  --fg:#dbe4ee; --fg2:#aebccb; --muted:#7f93a8;
+  --exact:#4fd1c5; --rates:#f0a04b; --good:#5ddc9a; --bad:#ff7b7b; --warn:#ffd166; --focus:#6ea8fe;
+  --chip:#16202b; --mark:#ff7b7b;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+:root[data-theme="light"]{
+  --bg:#f5f7fa; --panel:#ffffff; --panel2:#eef2f6; --line:#d9e0e8; --line2:#c3ced9;
+  --fg:#0f1720; --fg2:#33445a; --muted:#5a6b80;
+  --exact:#0b7a72; --rates:#8a4f00; --good:#0d7a45; --bad:#b3261e; --warn:#8a6100; --focus:#0b5fd0;
+  --chip:#e7edf4; --mark:#b3261e;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--fg); font-family:var(--sans);
+  font-size:15px; line-height:1.55; -webkit-text-size-adjust:100%;
+  overflow-x:hidden;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:20px 16px 64px}
+a{color:var(--focus)}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:4px}
+h1,h2,h3{line-height:1.25;margin:0 0 8px}
+h1{font-size:1.6rem;letter-spacing:-0.01em}
+h2{font-size:1.12rem;letter-spacing:-0.005em}
+h3{font-size:0.95rem}
+p{margin:0 0 10px}
+code,kbd,pre,textarea,.mono{font-family:var(--mono)}
+hr{border:0;border-top:1px solid var(--line);margin:22px 0}
+
+/* header */
+header.top{display:flex;gap:14px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;margin-bottom:6px}
+.brandline{font-size:0.72rem;letter-spacing:0.13em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.lede{color:var(--fg2);max-width:74ch;margin:6px 0 0}
+.themebtn{
+  background:var(--chip);color:var(--fg);border:1px solid var(--line2);
+  border-radius:8px;padding:8px 12px;cursor:pointer;font:inherit;font-size:0.85rem;white-space:nowrap;
+}
+.themebtn:hover{border-color:var(--focus)}
+
+/* generic surfaces */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:14px 0}
+.panel.tight{padding:13px}
+.sub{color:var(--muted);font-size:0.86rem}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr));gap:12px}
+.grid2>*,.grid3>*{min-width:0}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.spread{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+
+/* zone badges */
+.zone{display:inline-flex;align-items:center;gap:6px;font-size:0.7rem;letter-spacing:0.06em;text-transform:uppercase;
+  border-radius:999px;padding:3px 9px;border:1px solid;font-weight:600;white-space:nowrap}
+.z-exact{color:var(--exact);border-color:var(--exact);background:transparent}
+.z-rates{color:var(--rates);border-color:var(--rates);background:transparent}
+.zone .dot{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+.panelhead{display:flex;gap:10px;align-items:baseline;justify-content:space-between;flex-wrap:wrap;margin-bottom:8px}
+.panelhead h2{margin:0}
+
+/* forms */
+label{display:block;font-size:0.82rem;color:var(--fg2);margin-bottom:5px;font-weight:600}
+textarea,input,select{
+  width:100%;background:var(--panel2);color:var(--fg);border:1px solid var(--line2);
+  border-radius:8px;padding:9px 10px;font-size:0.88rem;font-family:inherit;
+}
+textarea{font-family:var(--mono);font-size:0.79rem;line-height:1.5;min-height:200px;resize:vertical;white-space:pre;overflow:auto}
+textarea.rates{min-height:230px}
+input[type="number"]{font-family:var(--mono)}
+select{cursor:pointer}
+.btn{
+  background:var(--chip);color:var(--fg);border:1px solid var(--line2);border-radius:8px;
+  padding:9px 14px;cursor:pointer;font:inherit;font-size:0.87rem;font-weight:600;white-space:nowrap;
+}
+.btn:hover{border-color:var(--focus)}
+.btn.primary{background:var(--focus);border-color:var(--focus);color:#04101f}
+:root[data-theme="light"] .btn.primary{color:#fff}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.small{padding:5px 10px;font-size:0.76rem;font-weight:500}
+fieldset{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin:0}
+legend{font-size:0.78rem;color:var(--fg2);padding:0 6px;font-weight:600}
+.radios{display:flex;gap:14px;flex-wrap:wrap}
+.radios label{display:flex;align-items:center;gap:6px;margin:0;font-weight:500;cursor:pointer}
+.radios input{width:auto}
+.checkline{display:flex;align-items:center;gap:8px}
+.checkline input{width:auto}
+.checkline label{margin:0;font-weight:500;cursor:pointer}
+.fieldnote{font-size:0.75rem;color:var(--muted);margin-top:4px}
+
+/* chips + verdicts */
+.chip{display:inline-block;background:var(--chip);border:1px solid var(--line2);border-radius:6px;
+  padding:2px 8px;font-size:0.75rem;font-family:var(--mono);color:var(--fg2)}
+.v{display:inline-block;border-radius:5px;padding:1px 8px;font-size:0.73rem;font-weight:700;letter-spacing:0.04em;border:1px solid}
+.v-pass{color:var(--good);border-color:var(--good)}
+.v-fail{color:var(--bad);border-color:var(--bad)}
+.v-border{color:var(--warn);border-color:var(--warn)}
+.v-info{color:var(--fg2);border-color:var(--line2)}
+
+/* callouts */
+.note{border-left:3px solid var(--line2);padding:9px 12px;background:var(--panel2);border-radius:0 8px 8px 0;margin:10px 0;font-size:0.88rem}
+.note.bad{border-left-color:var(--bad)}
+.note.good{border-left-color:var(--good)}
+.note.warn{border-left-color:var(--warn)}
+.note.info{border-left-color:var(--focus)}
+.note.rates{border-left-color:var(--rates)}
+.note p:last-child{margin-bottom:0}
+.empty{color:var(--muted);text-align:center;padding:26px 14px;border:1px dashed var(--line2);border-radius:10px;font-size:0.9rem}
+
+/* code + tables */
+pre.code{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:11px;
+  overflow-x:auto;font-size:0.78rem;line-height:1.55;margin:8px 0;white-space:pre-wrap;word-break:break-word}
+.ctx{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:11px;
+  font-family:var(--mono);font-size:0.77rem;line-height:1.6;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:6px 0}
+.ctx .cut{display:inline-block;width:0;border-left:2px solid var(--mark);height:1.15em;vertical-align:text-bottom;margin:0 1px}
+.ctx .pre{color:var(--muted)}
+.ctx .post{color:var(--fg)}
+.tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:8px 0;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:0.82rem;min-width:520px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--panel2);font-weight:700;color:var(--fg2);font-size:0.75rem;letter-spacing:0.03em;text-transform:uppercase;white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;font-family:var(--mono);white-space:nowrap}
+td.mono{font-family:var(--mono);font-size:0.78rem}
+.vendor{border:1px solid var(--rates);border-radius:10px;padding:13px;background:var(--panel2)}
+.vendor table{min-width:600px}
+
+/* timeline */
+.tl{margin:12px 0}
+.tlbar{position:relative;height:34px;background:var(--panel2);border:1px solid var(--line2);border-radius:7px;overflow:hidden}
+.tl-ttl{position:absolute;top:0;bottom:0;left:0;background:rgba(93,220,154,0.16);border-right:2px solid var(--good)}
+.tl-stream{position:absolute;top:0;height:12px;left:0;background:rgba(110,168,254,0.5)}
+.tl-next{position:absolute;top:0;bottom:0;width:2px;background:var(--bad)}
+.tllabels{display:flex;justify-content:space-between;font-size:0.72rem;color:var(--muted);margin-top:5px;font-family:var(--mono);gap:8px;flex-wrap:wrap}
+.tlkey{display:flex;gap:14px;flex-wrap:wrap;font-size:0.75rem;color:var(--fg2);margin-top:8px}
+.tlkey span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;display:inline-block;border:1px solid var(--line2)}
+.sw.ttl{background:rgba(93,220,154,0.35)}
+.sw.stream{background:rgba(110,168,254,0.6)}
+.sw.next{background:var(--bad)}
+
+/* stats */
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px}
+.stat .k{font-size:0.71rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:3px}
+.stat .val{font-family:var(--mono);font-size:1.02rem;font-weight:700;word-break:break-word}
+.algebra{font-family:var(--mono);font-size:0.8rem;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:11px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;line-height:1.7}
+.small{font-size:0.82rem}
+ul.tidy,ol.tidy{margin:6px 0 10px;padding-left:20px}
+ul.tidy li,ol.tidy li{margin-bottom:5px}
+.related{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:10px}
+.related>*{min-width:0}
+.related a{display:block;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 12px;text-decoration:none;color:inherit}
+.related a:hover{border-color:var(--focus);text-decoration:none}
+.related .rt{font-weight:700;font-family:var(--mono);font-size:0.84rem;color:var(--focus)}
+.related .rd{font-size:0.8rem;color:var(--fg2);margin-top:3px}
+footer{border-top:1px solid var(--line);margin-top:34px;padding-top:16px;color:var(--muted);font-size:0.85rem}
+footer a{margin-right:16px;display:inline-block}
+.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.copyrow{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px;flex-wrap:wrap}
+.err{color:var(--bad);font-family:var(--mono);font-size:0.8rem;white-space:pre-wrap;word-break:break-word}
+.anchorlinks a{margin-right:14px;font-size:0.84rem;display:inline-block}
+@media (max-width:520px){
+  .wrap{padding:14px 11px 48px}
+  h1{font-size:1.3rem}
+  .btn{padding:8px 11px;font-size:0.82rem}
+  textarea{font-size:0.74rem}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div>
+    <div class="brandline">An elitesystem.ai tool</div>
+    <h1>Prompt Cache Inspector</h1>
+  </div>
+  <button type="button" class="themebtn" id="themeBtn" aria-pressed="false">Switch to light</button>
+</header>
+
+<p class="lede">Paste two consecutive request bodies and find the exact byte where your cached prefix broke, whether your breakpoints are even legal, and whether caching is paying for itself at your request rate.</p>
+
+<div class="note info small">
+  <p><strong>Scope.</strong> This models <strong>Anthropic prompt caching</strong> as documented in the Anthropic Messages API. Other providers implement caching differently (different render order, different minimums, different economics) and are out of scope here. Nothing on this page is a general cross-provider claim.</p>
+  <p style="margin-top:6px">Everything runs in your browser. No request is sent anywhere, no API key is used, and no backend exists. <strong>This tool measures nothing about your actual traffic</strong> - it reasons about the bodies you paste. See <a href="#measure">How to measure it for real</a>.</p>
+</div>
+
+<div class="panel tight">
+  <div class="row" style="gap:16px">
+    <span class="zone z-exact"><span class="dot"></span>Computed from your input</span>
+    <span class="sub">Byte-exact arithmetic on the bodies you pasted. No vendor numbers involved.</span>
+  </div>
+  <div class="row" style="gap:16px;margin-top:8px">
+    <span class="zone z-rates"><span class="dot"></span>Computed from the rates table</span>
+    <span class="sub">Depends on the dated <a href="#rates">rates block</a> below. A stale row there makes these numbers stale, not the analysis above.</span>
+  </div>
+</div>
+
+<!-- ============ INPUTS ============ -->
+<section class="panel" aria-labelledby="inputs-h">
+  <div class="panelhead">
+    <h2 id="inputs-h">1. Inputs</h2>
+    <div class="row">
+      <button type="button" class="btn" id="sampleBtn">Load sample</button>
+      <button type="button" class="btn" id="clearBtn">Clear</button>
+      <button type="button" class="btn primary" id="runBtn">Analyze</button>
+    </div>
+  </div>
+
+  <div class="checkline" style="margin-bottom:12px">
+    <input type="checkbox" id="singleMode">
+    <label for="singleMode">Single request mode (audit one body: breakpoints, lookback coverage, TTL, throughput, invalidator scan)</label>
+  </div>
+
+  <div class="note warn small" id="sampleFlag" hidden>
+    <p><strong>Synthetic sample loaded.</strong> These two bodies were written by hand to demonstrate four separate cache traps in one click. They are illustrative - not real traffic, not a benchmark, and not measured from any running system. Replace them with your own logged request bodies to get an answer about yours.</p>
+  </div>
+
+  <div class="grid2">
+    <div>
+      <div class="copyrow">
+        <label for="bodyA">Request N (raw JSON body)</label>
+        <button type="button" class="btn small" data-copy="bodyA">Copy</button>
+      </div>
+      <textarea id="bodyA" spellcheck="false" placeholder='Paste the raw Anthropic Messages request body, for example:
+{
+  "model": "claude-opus-4-8",
+  "tools": [ ... ],
+  "system": [ ... ],
+  "messages": [ ... ]
+}
+
+A whole curl invocation works too - the tool will pull the JSON out and tell you it did.'></textarea>
+      <div class="fieldnote" id="metaA">No body loaded.</div>
+    </div>
+    <div id="bWrap">
+      <div class="copyrow">
+        <label for="bodyB">Request N+1 (raw JSON body)</label>
+        <button type="button" class="btn small" data-copy="bodyB">Copy</button>
+      </div>
+      <textarea id="bodyB" spellcheck="false" placeholder="Paste the next request in the same conversation - the one you expected to get a cache read."></textarea>
+      <div class="fieldnote" id="metaB">No body loaded.</div>
+    </div>
+  </div>
+
+  <div class="grid3" style="margin-top:14px">
+    <div>
+      <label for="modelSel">Model (sets the minimum cacheable prefix)</label>
+      <select id="modelSel"></select>
+      <div class="fieldnote" id="modelNote">Auto-detected from the body's <code>model</code> field when possible.</div>
+    </div>
+    <div id="customWrap" hidden>
+      <label for="customFloor">Custom minimum prefix (tokens)</label>
+      <input type="number" id="customFloor" min="0" step="1" value="1024">
+      <label for="customPrice" style="margin-top:8px">Custom base input price ($ per 1M tokens)</label>
+      <input type="number" id="customPrice" min="0" step="0.01" value="5">
+    </div>
+    <div>
+      <fieldset>
+        <legend>TTL tier</legend>
+        <div class="radios">
+          <label><input type="radio" name="ttl" value="5m" id="ttl5m" checked> 5 minutes</label>
+          <label><input type="radio" name="ttl" value="1h" id="ttl1h"> 1 hour</label>
+        </div>
+        <div class="fieldnote" id="ttlNote">Auto-detected from any <code>cache_control.ttl</code> present.</div>
+      </fieldset>
+    </div>
+  </div>
+
+  <div class="grid3" style="margin-top:12px">
+    <div>
+      <label for="gapSec">Seconds from request N start to request N+1 start</label>
+      <input type="number" id="gapSec" min="0" step="1" value="0">
+    </div>
+    <div>
+      <label for="streamSec">Seconds request N spent streaming</label>
+      <input type="number" id="streamSec" min="0" step="1" value="0">
+    </div>
+    <div>
+      <label for="itpmLimit">Your input-tokens-per-minute (ITPM) limit</label>
+      <input type="number" id="itpmLimit" min="0" step="1000" value="2000000">
+    </div>
+  </div>
+</section>
+
+<div id="status" role="status" aria-live="polite" class="sr"></div>
+<div id="out"></div>
+
+<!-- ============ MEASURE FOR REAL (permanent) ============ -->
+<section class="panel" id="measure" aria-labelledby="measure-h">
+  <div class="panelhead">
+    <h2 id="measure-h">How to measure it for real</h2>
+    <span class="zone z-rates"><span class="dot"></span>Vendor field names, dated</span>
+  </div>
+  <p class="small">This tool <strong>estimates</strong>. The API <strong>measures</strong>. Read these fields from the <code>usage</code> object on the response (or from the <code>message_start</code> event when streaming):</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Field</th><th>What it actually is</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">cache_creation_input_tokens</td><td>Tokens written to the cache when creating a new entry.</td></tr>
+        <tr><td class="mono">cache_read_input_tokens</td><td>Tokens served from the cache on this request.</td></tr>
+        <tr><td class="mono">input_tokens</td><td>Only the tokens <strong>after the last cache breakpoint</strong>. This is the field teams misread.</td></tr>
+        <tr><td class="mono">cache_creation.ephemeral_5m_input_tokens</td><td>Per-tier breakdown of the write: the 5-minute portion.</td></tr>
+        <tr><td class="mono">cache_creation.ephemeral_1h_input_tokens</td><td>Per-tier breakdown of the write: the 1-hour portion.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="algebra">total_input_tokens = cache_read_input_tokens + cache_creation_input_tokens + input_tokens</div>
+  <div class="note bad small">
+    <p><strong>The diagnostic that matters.</strong> If <code>cache_read_input_tokens</code> is zero across repeated requests that you believe share a stable prefix, a silent invalidator is at work. There is no error and no warning - the number simply stays at zero. That is the case this tool exists to localize.</p>
+  </div>
+  <p class="small" style="margin-bottom:0">A second silent case: if both <code>cache_creation_input_tokens</code> and <code>cache_read_input_tokens</code> are zero, the prompt was not cached at all, most often because the prefix fell under the model's minimum. Again, no error is returned.</p>
+</section>
+
+<!-- ============ RATES ============ -->
+<section class="panel" id="rates" aria-labelledby="rates-h">
+  <div class="panelhead">
+    <h2 id="rates-h">Rates, floors and limits</h2>
+    <span class="zone z-rates"><span class="dot"></span>Dated vendor data - edit freely</span>
+  </div>
+  <p class="small">Every priced number and every floor verdict on this page is computed from the block below. Nothing is hardcoded in the logic. If a value changes, edit it here and the answers change with it - including the break-even count, which is <em>derived</em> from the multipliers rather than baked in.</p>
+  <div class="note rates small">
+    <p><strong>Confirmed 2026-08-07</strong> against
+      <a href="https://platform.claude.com/docs/en/build-with-claude/prompt-caching" rel="nofollow noopener">platform.claude.com prompt caching</a>
+      and
+      <a href="https://platform.claude.com/docs/en/api/rate-limits" rel="nofollow noopener">platform.claude.com rate limits</a>.
+      A stale row here produces a visibly stale answer that you can fix yourself. It cannot make the byte-level diagnosis above wrong.</p>
+  </div>
+  <div class="copyrow">
+    <label for="ratesBox">Rates block (JSON)</label>
+    <div class="row">
+      <button type="button" class="btn small" data-copy="ratesBox">Copy</button>
+      <button type="button" class="btn small" id="resetRates">Reset to defaults</button>
+    </div>
+  </div>
+  <textarea id="ratesBox" class="rates" spellcheck="false"></textarea>
+  <div class="fieldnote" id="ratesStatus"></div>
+</section>
+
+<!-- ============ INVALIDATION TABLE ============ -->
+<section class="panel" aria-labelledby="inval-h">
+  <div class="panelhead">
+    <h2 id="inval-h">Invalidation hierarchy</h2>
+    <span class="zone z-rates"><span class="dot"></span>Vendor table, confirmed 2026-08-07</span>
+  </div>
+  <p class="small">Render order is <code>tools</code>, then <code>system</code>, then <code>messages</code>. A change at one level invalidates that level and every level after it. <span class="v v-pass">valid</span> means that tier survives the change; <span class="v v-fail">broken</span> means it does not.</p>
+  <div class="vendor">
+    <div class="tablewrap" style="border:0">
+      <table>
+        <thead><tr><th>What changes</th><th>Tools cache</th><th>System cache</th><th>Messages cache</th></tr></thead>
+        <tbody>
+          <tr><td>Tool definitions (names, descriptions, parameters, order)</td><td><span class="v v-fail">broken</span></td><td><span class="v v-fail">broken</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Web search toggle</td><td><span class="v v-pass">valid</span></td><td><span class="v v-fail">broken</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Citations toggle</td><td><span class="v v-pass">valid</span></td><td><span class="v v-fail">broken</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Speed setting (fast vs standard)</td><td><span class="v v-pass">valid</span></td><td><span class="v v-fail">broken</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Tool choice</td><td><span class="v v-pass">valid</span></td><td><span class="v v-pass">valid</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Images added or removed anywhere in the prompt</td><td><span class="v v-pass">valid</span></td><td><span class="v v-pass">valid</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Thinking parameters</td><td><span class="v v-info">model-specific</span></td><td><span class="v v-info">model-specific</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Effort setting</td><td><span class="v v-info">model-specific</span></td><td><span class="v v-info">model-specific</span></td><td><span class="v v-fail">broken</span></td></tr>
+          <tr><td>Non-tool results passed to extended thinking requests</td><td><span class="v v-pass">valid</span></td><td><span class="v v-pass">valid</span></td><td><span class="v v-info">model-specific</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="note warn small">
+    <p><strong>Do not read the thinking and effort rows as green.</strong> The documented table marks the tools and system columns for both of those rows as <em>model-specific</em>, not as preserved. The configuration is rendered into the prompt, so it always invalidates message blocks; whether it also invalidates tools and system depends on whether the model renders that configuration ahead of them. Setting effort explicitly to the model's default is equivalent to omitting it and does not invalidate.</p>
+  </div>
+  <p class="small" style="margin-bottom:0">Two escape hatches worth knowing, both documented: on the models that support it, appending a <code>{"role": "system"}</code> message to <code>messages</code> adds an instruction mid-conversation without invalidating the system or message caches, whereas editing the top-level <code>system</code> field does invalidate them. And a model switch has no escape hatch at all - cache entries are scoped to a model.</p>
+</section>
+
+<!-- ============ METHOD ============ -->
+<section class="panel" aria-labelledby="method-h">
+  <div class="panelhead"><h2 id="method-h">What this computes exactly, and what it only estimates</h2></div>
+  <div class="grid2">
+    <div>
+      <h3 style="color:var(--exact)">Exact</h3>
+      <ul class="tidy small">
+        <li><strong>The render order walk.</strong> Every entry of <code>tools</code> in array order, then <code>system</code>, then every content block of every message in order.</li>
+        <li><strong>The block index and byte offset of the first divergence.</strong> This is a character comparison over a deterministic local rendering of your two bodies. It involves no vendor constant and no estimate.</li>
+        <li><strong>Breakpoint positions and counts</strong>, and where each sits relative to the divergence.</li>
+        <li><strong>The lookback arithmetic</strong> once you supply the window size from the rates block.</li>
+        <li><strong>The TTL arithmetic</strong> once you supply the tier duration and your two timings.</li>
+      </ul>
+    </div>
+    <div>
+      <h3 style="color:var(--rates)">Estimated</h3>
+      <ul class="tidy small">
+        <li><strong>Every token count on this page is an estimate</strong> from a character heuristic, rendered as a band and never as a point value. The method is printed in the analysis output.</li>
+        <li>OpenAI tokenizers such as <code>tiktoken</code> are <strong>wrong for Claude</strong> and this tool does not use one. Nor does it embed a Claude tokenizer - it has no network access and ships no model files.</li>
+        <li>Any prefix whose band straddles the model's floor renders <strong>BORDERLINE</strong>, never as a pass or a fail. Confirm those with the <code>count_tokens</code> endpoint.</li>
+        <li>All prices, floors, multipliers, TTL durations, the breakpoint maximum and the lookback size come from the editable rates block and carry its date.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="note small">
+    <p><strong>On the render.</strong> The byte offsets reported here are offsets into this tool's own deterministic serialization of your body, not into the provider's internal wire format. What matters for diagnosis is that the serialization is stable and order-preserving, so a difference in it corresponds to a real difference in your request. Object keys are emitted in the order they appear in your JSON and are never sorted, because a non-deterministic serializer on your side is itself a real invalidator this tool needs to be able to name.</p>
+    <p style="margin-top:6px"><strong>On <code>cache_control</code>.</strong> Markers are treated as caching directives rather than prompt content, so they are excluded from the compared bytes and tracked separately. Moving a marker changes which entry gets written; it does not change the prompt text.</p>
+    <p style="margin-top:6px"><strong>No headline savings percentage appears anywhere on this page.</strong> The economics panel prints the formula and solves for the break-even request count instead, because a percentage without a request count is not a claim you can act on.</p>
+  </div>
+</section>
+
+<!-- ============ RELATED ============ -->
+<section class="panel" aria-labelledby="rel-h">
+  <div class="panelhead"><h2 id="rel-h">Related tools</h2></div>
+  <div class="related">
+    <a href="https://0xelitesystem.github.io/context-budget-planner/"><span class="rt">context-budget-planner</span><span class="rd">The input-side sibling. It allocates the context window across consumers; this one keeps the prefix stable inside it.</span></a>
+    <a href="https://0xelitesystem.github.io/prompt-cost-calculator/"><span class="rt">prompt-cost-calculator</span><span class="rd">Prices a single prompt across providers. This one prices a prefix across repeated requests.</span></a>
+    <a href="https://0xelitesystem.github.io/token-cost-estimator/"><span class="rt">token-cost-estimator</span><span class="rd">Turns a token count into a bill. Use it once you know your real counts from the usage object.</span></a>
+    <a href="https://github.com/0xelitesystem/agent-cost"><span class="rt">agent-cost</span><span class="rd">Retrospective transcript forensics after the run. This tool works on two request bodies before the run.</span></a>
+    <a href="https://0xelitesystem.github.io/llm-stream-inspector/"><span class="rt">llm-stream-inspector</span><span class="rd">For when the response, not the prefix, is the problem.</span></a>
+    <a href="https://0xelitesystem.github.io/tokenizer-visualizer/"><span class="rt">tokenizer-visualizer</span><span class="rd">Why the token counts here are a band rather than a number.</span></a>
+    <a href="https://0xelitesystem.github.io/prompt-diff/"><span class="rt">prompt-diff</span><span class="rd">Human-readable prompt diffing, as opposed to render-order prefix analysis.</span></a>
+    <a href="https://github.com/0xelitesystem/caching-basics-reference"><span class="rt">caching-basics-reference</span><span class="rd">HTTP, CDN and database caching. A different subject entirely - linked so the two are not confused.</span></a>
+    <a href="https://github.com/0xelitesystem/api-provider-cost-control-reference"><span class="rt">api-provider-cost-control-reference</span><span class="rd">Spend management around whatever this analysis tells you.</span></a>
+  </div>
+</section>
+
+<footer>
+  <a href="https://elitesystem.ai">An elitesystem.ai tool</a>
+  <a href="https://github.com/0xelitesystem/prompt-cache-inspector">Source on GitHub</a>
+  <a href="https://0xelitesystem.github.io/">More tools</a>
+</footer>
+
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   PURE CORE
+   Every function in this section takes input and returns a result
+   object. None of them touch document or window.
+   ============================================================ */
+
+function escapeHtml(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeNum(value, fallback) {
+  var n = Number(value);
+  return isFinite(n) ? n : (isFinite(fallback) ? fallback : 0);
+}
+
+function fmtInt(value) {
+  var n = Number(value);
+  if (!isFinite(n)) return '-';
+  return Math.round(n).toLocaleString('en-US');
+}
+
+function fmtNum(value, places) {
+  var n = Number(value);
+  if (!isFinite(n)) return '-';
+  var p = isFinite(places) ? places : 2;
+  return n.toFixed(p);
+}
+
+function fmtUsd(value, places) {
+  var n = Number(value);
+  if (!isFinite(n)) return '-';
+  var abs = Math.abs(n);
+  var p = isFinite(places) ? places : (abs >= 1 ? 2 : (abs >= 0.01 ? 4 : 6));
+  return (n < 0 ? '-$' : '$') + abs.toFixed(p);
+}
+
+function usdPlacesFor(values) {
+  var maxAbs = 0;
+  for (var i = 0; i < values.length; i++) {
+    var v = Number(values[i]);
+    if (isFinite(v) && Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
+  }
+  if (maxAbs >= 1) return 2;
+  if (maxAbs >= 0.01) return 4;
+  return 6;
+}
+
+function fmtSeconds(value) {
+  var n = Number(value);
+  if (!isFinite(n)) return '-';
+  var sign = n < 0 ? '-' : '';
+  var a = Math.abs(n);
+  if (a < 60) return sign + fmtNum(a, a % 1 === 0 ? 0 : 1) + 's';
+  var totalMin = Math.floor(a / 60);
+  var s = Math.round(a - totalMin * 60);
+  if (s === 60) { totalMin += 1; s = 0; }
+  if (totalMin < 60) return sign + totalMin + 'm' + (s ? ' ' + s + 's' : '');
+  var h = Math.floor(totalMin / 60);
+  var m = totalMin - h * 60;
+  return sign + h + 'h' + (m ? ' ' + m + 'm' : '') + (s ? ' ' + s + 's' : '');
+}
+
+/* Lookup maps keyed by user-supplied or data-derived strings must be
+   prototype-free, so a key literally named constructor or __proto__ is
+   stored and read like any other key. */
+function toLookup(source) {
+  var map = Object.create(null);
+  if (source && typeof source === 'object' && !Array.isArray(source)) {
+    var keys = Object.keys(source);
+    for (var i = 0; i < keys.length; i++) {
+      map[keys[i]] = source[keys[i]];
+    }
+  }
+  return map;
+}
+
+function lookupHas(map, key) {
+  if (!map) return false;
+  return Object.prototype.hasOwnProperty.call(map, String(key));
+}
+
+function lookupGet(map, key) {
+  return lookupHas(map, key) ? map[String(key)] : undefined;
+}
+
+/* Deterministic, order-preserving serialization. Keys are emitted in the
+   order they appear in the source and are never sorted. */
+function canonicalSerialize(value) {
+  var out = [];
+  function walk(v, depth) {
+    if (depth > 96) { out.push('"[depth-limit]"'); return; }
+    if (v === null) { out.push('null'); return; }
+    var t = typeof v;
+    if (t === 'string') { out.push(JSON.stringify(v)); return; }
+    if (t === 'number') { out.push(isFinite(v) ? String(v) : 'null'); return; }
+    if (t === 'boolean') { out.push(v ? 'true' : 'false'); return; }
+    if (Array.isArray(v)) {
+      out.push('[');
+      for (var i = 0; i < v.length; i++) {
+        if (i > 0) out.push(',');
+        walk(v[i], depth + 1);
+      }
+      out.push(']');
+      return;
+    }
+    if (t === 'object') {
+      out.push('{');
+      var keys = Object.keys(v);
+      var first = true;
+      for (var j = 0; j < keys.length; j++) {
+        var k = keys[j];
+        var val = v[k];
+        if (typeof val === 'undefined' || typeof val === 'function') continue;
+        if (!first) out.push(',');
+        first = false;
+        out.push(JSON.stringify(k));
+        out.push(':');
+        walk(val, depth + 1);
+      }
+      out.push('}');
+      return;
+    }
+    out.push('null');
+  }
+  walk(value, 0);
+  return out.join('');
+}
+
+function withoutCacheControl(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+  if (!Object.prototype.hasOwnProperty.call(obj, 'cache_control')) return obj;
+  var clone = {};
+  var keys = Object.keys(obj);
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i] !== 'cache_control') clone[keys[i]] = obj[keys[i]];
+  }
+  return clone;
+}
+
+function readCacheControl(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    return { present: false, ttl: null, explicitTtl: false };
+  }
+  if (!Object.prototype.hasOwnProperty.call(obj, 'cache_control')) {
+    return { present: false, ttl: null, explicitTtl: false };
+  }
+  var cc = obj.cache_control;
+  var explicit = !!(cc && typeof cc === 'object' && typeof cc.ttl === 'string');
+  return { present: true, ttl: explicit ? cc.ttl : '5m', explicitTtl: explicit };
+}
+
+/* Pull a JSON object out of a pasted curl invocation or -d wrapper.
+   Linear scan, no backtracking. */
+function stripCurlWrapper(raw) {
+  var text = String(raw === null || raw === undefined ? '' : raw);
+  var trimmed = text.replace(/^[\s]+/, '').replace(/[\s]+$/, '');
+  if (!trimmed) return { text: '', stripped: false, note: null };
+  if (trimmed.charAt(0) === '{' || trimmed.charAt(0) === '[') {
+    return { text: trimmed, stripped: false, note: null };
+  }
+  var first = trimmed.indexOf('{');
+  var last = trimmed.lastIndexOf('}');
+  if (first === -1 || last === -1 || last <= first) {
+    return { text: trimmed, stripped: false, note: null };
+  }
+  return {
+    text: trimmed.slice(first, last + 1),
+    stripped: true,
+    note: 'Input did not start with a JSON object, so the tool took the span from the first "{" to the last "}" and ignored everything around it (a curl invocation, a -d wrapper, or shell quoting). Check the parsed block count below if that guess looks wrong.'
+  };
+}
+
+function jsonErrorLocation(text, message) {
+  var m = /position\s+(\d+)/.exec(String(message === null || message === undefined ? '' : message));
+  if (!m) return null;
+  var idx = parseInt(m[1], 10);
+  if (!isFinite(idx) || idx < 0) return null;
+  if (idx > text.length) idx = text.length;
+  var line = 1;
+  var col = 1;
+  for (var i = 0; i < idx; i++) {
+    if (text.charCodeAt(i) === 10) { line += 1; col = 1; } else { col += 1; }
+  }
+  return { index: idx, line: line, column: col };
+}
+
+function parseBody(raw) {
+  var pre = stripCurlWrapper(raw);
+  if (!pre.text) {
+    return { ok: false, empty: true, error: { message: 'No input.' }, stripNote: null };
+  }
+  if (pre.text.length > 4000000) {
+    return {
+      ok: false, empty: false, stripNote: pre.note,
+      error: { message: 'Body is larger than 4,000,000 characters. Trim it before analysis so the page stays responsive.' }
+    };
+  }
+  try {
+    var value = JSON.parse(pre.text);
+    return { ok: true, value: value, text: pre.text, stripNote: pre.note };
+  } catch (err) {
+    var msg = err && err.message ? String(err.message) : 'Invalid JSON.';
+    var loc = jsonErrorLocation(pre.text, msg);
+    return { ok: false, empty: false, stripNote: pre.note, error: { message: msg, location: loc } };
+  }
+}
+
+function detectProvider(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { kind: 'unknown', reason: 'Top level of the body is not a JSON object.' };
+  }
+  var model = typeof body.model === 'string' ? body.model : '';
+  var lower = model.toLowerCase();
+  if (Array.isArray(body.contents)) {
+    return { kind: 'other', reason: 'Body has a top-level "contents" array, which is a Google Gemini shape, not an Anthropic Messages body.' };
+  }
+  if (Array.isArray(body.tools)) {
+    for (var i = 0; i < body.tools.length; i++) {
+      var t = body.tools[i];
+      if (t && typeof t === 'object' && t.type === 'function' && t.function && typeof t.function === 'object') {
+        return { kind: 'other', reason: 'A tool entry uses the {"type":"function","function":{...}} shape, which is an OpenAI shape. Anthropic tools carry name, description and input_schema at the top level of each entry.' };
+      }
+    }
+  }
+  if (!Array.isArray(body.messages) && (typeof body.input === 'string' || Array.isArray(body.input))) {
+    return { kind: 'other', reason: 'Body has a top-level "input" and no "messages" array, which is an OpenAI Responses shape.' };
+  }
+  if (lower && !/^claude/.test(lower)) {
+    if (/^(gpt|o1|o3|o4|chatgpt|gemini|llama|mistral|command|deepseek|grok|qwen)/.test(lower)) {
+      return { kind: 'other', reason: 'The model field names a non-Anthropic model (' + model + ').' };
+    }
+    return { kind: 'unclear', reason: 'The model field ("' + model + '") does not start with "claude". The tool still analyzed it as an Anthropic Messages body.' };
+  }
+  return { kind: 'anthropic', reason: '' };
+}
+
+/* Walk a body into an ordered list of cache blocks in provider render order:
+   every entry of tools, then system, then every content block of every message. */
+function renderBlocks(body) {
+  var blocks = [];
+  var notes = [];
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, blocks: [], notes: ['The body is not a JSON object, so there is nothing to render.'], topLevel: { present: false, ttl: null } };
+  }
+  var idx = 0;
+  function push(segment, role, type, bytesValue, ccSource, label) {
+    var cc = readCacheControl(ccSource);
+    blocks.push({
+      index: idx,
+      segment: segment,
+      role: role || null,
+      type: type,
+      label: label || null,
+      raw: bytesValue,
+      serialized: canonicalSerialize(bytesValue),
+      hasCacheControl: cc.present,
+      ttl: cc.present ? cc.ttl : null,
+      explicitTtl: cc.explicitTtl
+    });
+    idx += 1;
+  }
+
+  var hasTools = Object.prototype.hasOwnProperty.call(body, 'tools');
+  if (hasTools) {
+    if (Array.isArray(body.tools)) {
+      if (body.tools.length === 0) {
+        notes.push('The "tools" key is present but the array is empty. An empty tools array and an absent tools key render differently, so they are different cache prefixes. If one of your two bodies omits the key entirely and the other sends [], that alone is an invalidator.');
+      }
+      for (var i = 0; i < body.tools.length; i++) {
+        var tool = body.tools[i];
+        var name = (tool && typeof tool === 'object' && typeof tool.name === 'string') ? tool.name : ('tools[' + i + ']');
+        push('tools', null, 'tool', withoutCacheControl(tool), tool, name);
+      }
+    } else {
+      notes.push('The "tools" key is present but is not an array, so it was skipped.');
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'system')) {
+    var sys = body.system;
+    if (typeof sys === 'string') {
+      notes.push('"system" was given as a bare string, so it renders as a single block. A bare string and a one-element array of text blocks are different renderings.');
+      push('system', null, 'text', sys, null, 'system');
+    } else if (Array.isArray(sys)) {
+      for (var s = 0; s < sys.length; s++) {
+        var sb = sys[s];
+        var stype = (sb && typeof sb === 'object' && typeof sb.type === 'string') ? sb.type : 'unknown';
+        push('system', null, stype, withoutCacheControl(sb), sb, 'system[' + s + ']');
+      }
+    } else if (sys !== null && sys !== undefined) {
+      notes.push('"system" is neither a string nor an array, so it was skipped.');
+    }
+  }
+
+  if (Array.isArray(body.messages)) {
+    for (var m = 0; m < body.messages.length; m++) {
+      var msg = body.messages[m];
+      var role = (msg && typeof msg === 'object' && typeof msg.role === 'string') ? msg.role : 'unknown';
+      var content = msg && typeof msg === 'object' ? msg.content : undefined;
+      if (typeof content === 'string') {
+        push('messages', role, 'text', content, msg, 'messages[' + m + ']');
+      } else if (Array.isArray(content)) {
+        for (var c = 0; c < content.length; c++) {
+          var el = content[c];
+          var etype = (el && typeof el === 'object' && typeof el.type === 'string') ? el.type : 'unknown';
+          push('messages', role, etype, withoutCacheControl(el), el, 'messages[' + m + '].content[' + c + ']');
+        }
+      } else if (content !== undefined && content !== null) {
+        notes.push('messages[' + m + '].content is neither a string nor an array, so it was skipped.');
+      }
+    }
+  } else if (Object.prototype.hasOwnProperty.call(body, 'messages')) {
+    notes.push('"messages" is present but is not an array.');
+  } else {
+    notes.push('No "messages" key found. This does not look like a Messages API request body.');
+  }
+
+  return { ok: true, blocks: blocks, notes: notes, topLevel: readCacheControl(body) };
+}
+
+function longestCommonBytePrefix(x, y) {
+  var a = String(x);
+  var b = String(y);
+  var n = Math.min(a.length, b.length);
+  var i = 0;
+  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i += 1;
+  return i;
+}
+
+function diffRegion(x, y) {
+  var a = String(x);
+  var b = String(y);
+  var prefix = longestCommonBytePrefix(a, b);
+  var maxSuffix = Math.min(a.length, b.length) - prefix;
+  if (maxSuffix < 0) maxSuffix = 0;
+  var suffix = 0;
+  while (suffix < maxSuffix && a.charCodeAt(a.length - 1 - suffix) === b.charCodeAt(b.length - 1 - suffix)) {
+    suffix += 1;
+  }
+  return {
+    prefix: prefix,
+    suffix: suffix,
+    aPart: a.slice(prefix, a.length - suffix),
+    bPart: b.slice(prefix, b.length - suffix)
+  };
+}
+
+function blocksMatch(a, b) {
+  return a.segment === b.segment &&
+    a.type === b.type &&
+    (a.role || '') === (b.role || '') &&
+    a.serialized === b.serialized;
+}
+
+function compareRenders(blocksA, blocksB) {
+  var n = Math.min(blocksA.length, blocksB.length);
+  for (var i = 0; i < n; i++) {
+    var x = blocksA[i];
+    var y = blocksB[i];
+    if (!blocksMatch(x, y)) {
+      var structural = x.segment !== y.segment || x.type !== y.type || (x.role || '') !== (y.role || '');
+      return {
+        kind: 'divergence',
+        blockIndex: i,
+        byteOffset: longestCommonBytePrefix(x.serialized, y.serialized),
+        structural: structural,
+        a: x,
+        b: y,
+        commonBlocks: i,
+        lenA: blocksA.length,
+        lenB: blocksB.length
+      };
+    }
+  }
+  if (blocksA.length === blocksB.length) {
+    return { kind: 'identical', commonBlocks: n, lenA: blocksA.length, lenB: blocksB.length };
+  }
+  return {
+    kind: 'append',
+    commonBlocks: n,
+    intactThrough: n - 1,
+    longer: blocksA.length > blocksB.length ? 'N' : 'N+1',
+    extra: Math.abs(blocksA.length - blocksB.length),
+    lenA: blocksA.length,
+    lenB: blocksB.length
+  };
+}
+
+function laterDivergences(blocksA, blocksB, startIndex, limit) {
+  var out = [];
+  var cap = isFinite(limit) && limit > 0 ? limit : 25;
+  var n = Math.min(blocksA.length, blocksB.length);
+  for (var i = startIndex + 1; i < n && out.length < cap; i++) {
+    if (!blocksMatch(blocksA[i], blocksB[i])) {
+      out.push({
+        index: i,
+        segment: blocksA[i].segment,
+        type: blocksA[i].type,
+        role: blocksA[i].role,
+        label: blocksA[i].label,
+        byteOffset: longestCommonBytePrefix(blocksA[i].serialized, blocksB[i].serialized)
+      });
+    }
+  }
+  return out;
+}
+
+function findKeyOrderMismatch(a, b, path, depth) {
+  var p = path || '';
+  var d = depth || 0;
+  if (d > 24) return null;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return null;
+  if (Array.isArray(a) !== Array.isArray(b)) return null;
+  if (Array.isArray(a)) {
+    var n = Math.min(a.length, b.length);
+    for (var i = 0; i < n; i++) {
+      var r = findKeyOrderMismatch(a[i], b[i], p + '[' + i + ']', d + 1);
+      if (r) return r;
+    }
+    return null;
+  }
+  var ka = Object.keys(a);
+  var kb = Object.keys(b);
+  if (sameMultiset(ka, kb) && !sameSequence(ka, kb)) {
+    return { path: p || '(block root)', a: ka.slice(), b: kb.slice() };
+  }
+  for (var j = 0; j < ka.length; j++) {
+    var key = ka[j];
+    if (!Object.prototype.hasOwnProperty.call(b, key)) continue;
+    var nested = findKeyOrderMismatch(a[key], b[key], p ? (p + '.' + key) : key, d + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function toolNames(blocks) {
+  var names = [];
+  for (var i = 0; i < blocks.length; i++) {
+    if (blocks[i].segment === 'tools') names.push(blocks[i].label || ('tools[' + i + ']'));
+  }
+  return names;
+}
+
+function sameSequence(a, b) {
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+  return true;
+}
+
+function sameMultiset(a, b) {
+  if (a.length !== b.length) return false;
+  var x = a.slice().sort();
+  var y = b.slice().sort();
+  for (var i = 0; i < x.length; i++) { if (x[i] !== y[i]) return false; }
+  return true;
+}
+
+/* Every pattern below is linear: no nested quantifier over the same class,
+   no alternation inside a repetition. */
+function invalidatorPatterns() {
+  return [
+    { kind: 'iso8601', label: 'ISO-8601 timestamp', re: /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?/g },
+    { kind: 'rfc1123', label: 'RFC-1123 date', re: /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4}/g },
+    { kind: 'date', label: 'Date literal', re: /\d{4}-\d{2}-\d{2}/g },
+    { kind: 'clock', label: 'Clock time', re: /\b\d{2}:\d{2}:\d{2}\b/g },
+    { kind: 'epochms', label: 'Epoch milliseconds', re: /\b1[6-9]\d{11}\b/g },
+    { kind: 'epoch', label: 'Epoch seconds', re: /\b1[6-9]\d{8}\b/g },
+    { kind: 'uuid', label: 'UUID', re: /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g },
+    { kind: 'datephrase', label: 'Date phrasing', re: /(?:current date|current time|today is|todays date|as of today|the date is|right now it is)/gi },
+    { kind: 'idfield', label: 'Session or user identifier', re: /\b(?:session|user|request|trace|conversation|thread|tenant)[ _-]?id[ _-]?\s*[:=]\s*["']?[A-Za-z0-9_-]{3,}/gi },
+    { kind: 'idprefix', label: 'Session or user identifier', re: /\b(?:sess|session|user|usr|req|trace|conv)[_-][A-Za-z0-9][A-Za-z0-9_-]{2,}\b/g },
+    { kind: 'counter', label: 'Per-request counter', re: /\b(?:turn|request|iteration|attempt|sequence|counter|message)\s*(?:counter|number|index|no)?\s*[:=#]\s*\d+/gi }
+  ];
+}
+
+/* Does a match of this pattern actually straddle the divergence offset?
+   This is the evidence test: a UUID two hundred characters away is not the
+   cause, but a UUID whose own bytes differ is. Linear, bounded scan. */
+function patternAtOffset(text, offset, source) {
+  var s = String(text === null || text === undefined ? '' : text);
+  var o = Math.floor(safeNum(offset, 0));
+  var re = new RegExp(source, 'g');
+  var m;
+  var guard = 0;
+  while ((m = re.exec(s)) !== null) {
+    guard += 1;
+    if (guard > 5000) break;
+    if (m[0].length === 0) { re.lastIndex += 1; continue; }
+    var start = m.index;
+    var end = start + m[0].length;
+    if (start > o) break;
+    if (o >= start && o <= end) return m[0];
+  }
+  return null;
+}
+
+function overlaps(spans, start, end) {
+  for (var i = 0; i < spans.length; i++) {
+    if (start < spans[i][1] && end > spans[i][0]) return true;
+  }
+  return false;
+}
+
+/* Static scan for silent invalidators, run on one body independently.
+   Only tools and system are scanned: content ahead of the messages segment
+   is what silently poisons a prefix that is otherwise stable. */
+function scanInvalidators(blocks, limit) {
+  var cap = isFinite(limit) && limit > 0 ? limit : 200;
+  var patterns = invalidatorPatterns();
+  var findings = [];
+  for (var b = 0; b < blocks.length && findings.length < cap; b++) {
+    var block = blocks[b];
+    if (block.segment !== 'tools' && block.segment !== 'system') continue;
+    var text = block.serialized;
+    if (text.length > 200000) text = text.slice(0, 200000);
+    var spans = [];
+    for (var p = 0; p < patterns.length && findings.length < cap; p++) {
+      var pat = patterns[p];
+      var re = new RegExp(pat.re.source, pat.re.flags);
+      var match;
+      var guard = 0;
+      while ((match = re.exec(text)) !== null) {
+        guard += 1;
+        if (guard > 500) break;
+        if (match[0].length === 0) { re.lastIndex += 1; continue; }
+        var start = match.index;
+        var end = start + match[0].length;
+        if (!overlaps(spans, start, end)) {
+          spans.push([start, end]);
+          findings.push({
+            blockIndex: block.index,
+            segment: block.segment,
+            label: block.label,
+            kind: pat.kind,
+            what: pat.label,
+            offset: start,
+            sample: match[0].slice(0, 80)
+          });
+          if (findings.length >= cap) break;
+        }
+      }
+    }
+  }
+  return { findings: findings, truncated: findings.length >= cap };
+}
+
+/* Classify the FIRST divergence into a named cause with evidence.
+   Never claims a cause it cannot show evidence for. */
+function classifyDivergence(cmp, blocksA, blocksB, bodyA, bodyB) {
+  if (!cmp || cmp.kind !== 'divergence') return null;
+  var a = cmp.a;
+  var b = cmp.b;
+
+  if (a.segment === 'tools' || b.segment === 'tools') {
+    var namesA = toolNames(blocksA);
+    var namesB = toolNames(blocksB);
+    if (sameMultiset(namesA, namesB) && !sameSequence(namesA, namesB)) {
+      return {
+        code: 'TOOL_REORDER',
+        title: 'Tool reorder',
+        line: 'Both requests declare the same set of tools, but the array order differs.',
+        detail: 'Tools render first, so the order of the tools array is the very front of the cache prefix. Reordering it changes the prefix hash from block 0 and invalidates all three tiers - tools, system and messages - even though a pretty-printed JSON diff of the two bodies shows nothing that looks meaningful. A system prompt that never changed a single character dies with it.',
+        fix: 'Serialize the tools array in a fixed, deterministic order at the point where you build the request. Sorting by tool name is the usual fix. If the list is assembled from a set, a map, or a plugin registry, the iteration order is where the nondeterminism is entering.',
+        evidence: 'Request N tool order: ' + namesA.join(', ') + '\nRequest N+1 tool order: ' + namesB.join(', ')
+      };
+    }
+    var setA = Object.create(null); var setB = Object.create(null);
+    var i;
+    for (i = 0; i < namesA.length; i++) setA[namesA[i]] = true;
+    for (i = 0; i < namesB.length; i++) setB[namesB[i]] = true;
+    var added = []; var removed = [];
+    for (i = 0; i < namesB.length; i++) { if (!Object.prototype.hasOwnProperty.call(setA, namesB[i])) added.push(namesB[i]); }
+    for (i = 0; i < namesA.length; i++) { if (!Object.prototype.hasOwnProperty.call(setB, namesA[i])) removed.push(namesA[i]); }
+    if (added.length || removed.length) {
+      var parts = [];
+      if (added.length) parts.push('added in N+1: ' + added.join(', '));
+      if (removed.length) parts.push('removed in N+1: ' + removed.join(', '));
+      return {
+        code: 'TOOL_SET_CHANGED',
+        title: 'Tool added, removed or renamed',
+        line: 'The tool set differs between the two requests (' + parts.join('; ') + ').',
+        detail: 'Changing tool definitions - names, descriptions, parameters, or which tools are present - invalidates the entire cache: tools, system and messages. There is no partial credit.',
+        fix: 'Keep the tool set fixed for the lifetime of a conversation. If you need modes, do not swap the tool set: pass the mode as message content, or use the documented mid-conversation tool change mechanism on models that support it, which is designed to add and remove tools without invalidating the cached prefix.',
+        evidence: 'Request N tools: ' + namesA.join(', ') + '\nRequest N+1 tools: ' + namesB.join(', ')
+      };
+    }
+    var ko = findKeyOrderMismatch(a.raw, b.raw, '', 0);
+    if (ko) {
+      return {
+        code: 'KEY_REORDER',
+        title: 'Key reorder inside a tool definition',
+        line: 'The same keys appear in a different order at ' + ko.path + '.',
+        detail: 'Nothing about the meaning of the request changed, but the serialized bytes did, so the prefix hash changed. This is a nondeterministic serializer on your side, not a caching bug.',
+        fix: 'Serialize with sorted keys (json.dumps(..., sort_keys=True) or an equivalent), or build the object literally in a fixed order instead of from a dict, map, or struct whose iteration order is not guaranteed.',
+        evidence: 'Request N key order: ' + ko.a.join(', ') + '\nRequest N+1 key order: ' + ko.b.join(', ')
+      };
+    }
+    return {
+      code: 'TOOL_EDITED',
+      title: 'Tool definition edited',
+      line: 'The tool "' + (a.label || b.label || 'unknown') + '" has the same name in both requests but a different definition.',
+      detail: 'Editing a tool description, parameter schema, or any other field inside a tool definition invalidates all three cache tiers.',
+      fix: 'Freeze tool definitions per conversation. If a description is being generated or templated at request time, hoist that out of the request path.',
+      evidence: null
+    };
+  }
+
+  var region = diffRegion(a.serialized, b.serialized);
+  var contextStart = Math.max(0, region.prefix - 60);
+  /* The differing span can be megabytes on a base64 block. Cap what the
+     pattern probes scan so classification stays linear and bounded. */
+  var PROBE_CAP = 4000;
+  var contextA = a.serialized.slice(contextStart, region.prefix) + region.aPart.slice(0, PROBE_CAP);
+  var contextB = b.serialized.slice(contextStart, region.prefix) + region.bPart.slice(0, PROBE_CAP);
+  var probe = contextA + '\n' + contextB;
+
+  var normA = region.aPart.replace(/\s+/g, ' ').replace(/^ /, '').replace(/ $/, '');
+  var normB = region.bPart.replace(/\s+/g, ' ').replace(/^ /, '').replace(/ $/, '');
+  if (region.aPart !== region.bPart && normA === normB) {
+    return {
+      code: 'WHITESPACE',
+      title: 'Whitespace only',
+      line: 'The two blocks differ only in whitespace, most likely a trailing newline or an indentation change.',
+      detail: 'Caching is an exact byte match. Whitespace counts. A stray trailing newline appended by a template renderer is enough to lose the whole prefix.',
+      fix: 'Normalize whitespace where you build the prompt (a single rstrip on the template output usually does it), and stop re-rendering the static prefix through a templating engine on every request.',
+      evidence: 'Request N segment (escaped): ' + JSON.stringify(region.aPart.slice(0, 120)) + '\nRequest N+1 segment (escaped): ' + JSON.stringify(region.bPart.slice(0, 120))
+    };
+  }
+
+  var keyOrder = findKeyOrderMismatch(a.raw, b.raw, '', 0);
+  if (keyOrder) {
+    return {
+      code: 'KEY_REORDER',
+      title: 'Key reorder',
+      line: 'The same keys appear in a different order at ' + keyOrder.path + '.',
+      detail: 'The request means the same thing but does not serialize to the same bytes, so the prefix hash differs. This is a nondeterministic serializer, and it is invisible in a diff tool that pretty-prints and sorts.',
+      fix: 'Serialize with sorted keys, or construct the block in a fixed literal order rather than from a hash map whose iteration order is not guaranteed.',
+      evidence: 'Request N key order: ' + keyOrder.a.join(', ') + '\nRequest N+1 key order: ' + keyOrder.b.join(', ')
+    };
+  }
+
+  var uuidSource = '\\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\b';
+  var uuidRe = new RegExp(uuidSource);
+  /* Two UUIDs that differ only near their end leave a differing span of one
+     or two characters, so testing that span alone misses them. Also ask
+     whether a whole UUID straddles the divergence offset. */
+  var uuidStraddle = patternAtOffset(a.serialized, region.prefix, uuidSource) ||
+    patternAtOffset(b.serialized, region.prefix, uuidSource);
+  if (uuidRe.test(region.aPart) || uuidRe.test(region.bPart) || uuidStraddle) {
+    return {
+      code: 'UUID',
+      title: 'UUID or request identifier',
+      line: 'The differing bytes fall inside a UUID.',
+      detail: 'A per-request identifier interpolated anywhere at or before the breakpoint makes every request a unique prefix. You pay a fresh cache write every time and never get a read.',
+      fix: 'Move the identifier after the last breakpoint, or drop it from the prompt entirely and carry it in your own logging instead of in the model input.',
+      evidence: 'Request N segment: ' + region.aPart.slice(0, 160) + '\nRequest N+1 segment: ' + region.bPart.slice(0, 160)
+    };
+  }
+
+  var isoRe = /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+  var dateRe = /\d{4}-\d{2}-\d{2}/;
+  var epochRe = /\b1[6-9]\d{8,11}\b/;
+  var rfcRe = /(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4}/;
+  var phraseRe = /(?:current date|current time|today is|todays date|as of today|the date is)/i;
+  var clockRe = /\b\d{2}:\d{2}:\d{2}\b/;
+  if (isoRe.test(probe) || dateRe.test(probe) || epochRe.test(probe) || rfcRe.test(probe) || clockRe.test(probe) || phraseRe.test(probe)) {
+    return {
+      code: 'TIMESTAMP',
+      title: 'Timestamp or date',
+      line: 'The differing bytes are a date or time value.',
+      detail: 'A date or clock value in the prefix is the single most common cause of a cache read rate that sits at zero. It usually arrives from a datetime.now() call inside a system-prompt template.',
+      fix: 'Take the date out of the cached prefix. If the model genuinely needs it, put it in the user turn after the last breakpoint. If it only needs the day rather than the second, that still breaks the cache once per day - which may be fine, but decide it deliberately.',
+      evidence: 'Request N segment: ' + region.aPart.slice(0, 160) + '\nRequest N+1 segment: ' + region.bPart.slice(0, 160)
+    };
+  }
+
+  var idRe = /\b(?:session|user|request|trace|conversation|thread|tenant|account)[ _-]?id\b|\b(?:sess|usr|req|conv)[_-][A-Za-z0-9]/i;
+  if (idRe.test(probe)) {
+    return {
+      code: 'SESSION_ID',
+      title: 'Session or user identifier',
+      line: 'The differing bytes look like a session, user, tenant or conversation identifier.',
+      detail: 'An identifier interpolated into the system prompt gives every session (or every user) its own prefix. The cache still works within one session, but nothing is ever shared across them, which is usually not what the author intended.',
+      fix: 'If the identity is not load-bearing for the model, remove it. If it is, move it after the last breakpoint so the expensive shared prefix stays common to every session.',
+      evidence: 'Request N segment: ' + region.aPart.slice(0, 160) + '\nRequest N+1 segment: ' + region.bPart.slice(0, 160)
+    };
+  }
+
+  var counterRe = /\b(?:turn|request|iteration|attempt|sequence|counter|message)\s*(?:counter|number|index|no)?\s*[:=#]\s*\d+/i;
+  if (counterRe.test(probe)) {
+    return {
+      code: 'COUNTER',
+      title: 'Per-request counter',
+      line: 'The differing bytes contain a counter that increments per request.',
+      detail: 'A turn or request counter rendered into the prefix changes the bytes every single time, exactly like a timestamp.',
+      fix: 'Remove the counter from the cached prefix, or move it after the last breakpoint.',
+      evidence: 'Request N segment: ' + region.aPart.slice(0, 160) + '\nRequest N+1 segment: ' + region.bPart.slice(0, 160)
+    };
+  }
+
+  if (cmp.structural) {
+    return {
+      code: 'STRUCTURE',
+      title: 'Block structure changed',
+      line: 'The block at this position has a different segment, role or type between the two requests.',
+      detail: 'Request N has ' + a.segment + '/' + (a.role || 'no role') + '/' + a.type + ' at this position and request N+1 has ' + b.segment + '/' + (b.role || 'no role') + '/' + b.type + '. The block lists stopped lining up here, so nothing after this point can match.',
+      fix: 'Check whether a block was inserted or removed earlier in the request than you expected - for example a system block that is conditionally present, or a message whose content switched between a bare string and an array of blocks.',
+      evidence: null
+    };
+  }
+
+  return {
+    code: 'UNCLASSIFIED',
+    title: 'Unclassified',
+    line: 'The prefix diverges here, but this is not a pattern the tool recognises.',
+    detail: 'The raw differing bytes are shown below. The tool is not guessing at a cause it cannot demonstrate.',
+    fix: 'Read the two segments below. If they differ in a way that is generated per request, that is your invalidator; move it after the last breakpoint.',
+    evidence: 'Request N segment: ' + region.aPart.slice(0, 220) + '\nRequest N+1 segment: ' + region.bPart.slice(0, 220)
+  };
+}
+
+/* Token estimation. Character heuristic only, always returned as a band. */
+function estimateTokens(chars, band) {
+  var c = safeNum(chars, 0);
+  if (c < 0) c = 0;
+  var minCpt = safeNum(band && band.min, 3.2);
+  var maxCpt = safeNum(band && band.max, 4.4);
+  if (minCpt <= 0) minCpt = 3.2;
+  if (maxCpt <= 0) maxCpt = 4.4;
+  if (maxCpt < minCpt) { var t = minCpt; minCpt = maxCpt; maxCpt = t; }
+  var high = c / minCpt;
+  var low = c / maxCpt;
+  if (!isFinite(high)) high = 0;
+  if (!isFinite(low)) low = 0;
+  /* An exact division such as 4400 / 4.4 lands a hair below 1000 in binary
+     floating point, so floor and ceil get a tolerance rather than reporting
+     a band that is one token narrow at each end. */
+  return {
+    chars: c,
+    low: Math.max(0, Math.floor(low + 1e-9)),
+    high: Math.max(0, Math.ceil(high - 1e-9)),
+    mid: Math.round((low + high) / 2),
+    minCharsPerToken: minCpt,
+    maxCharsPerToken: maxCpt
+  };
+}
+
+function verdictAgainstFloor(est, floor) {
+  var f = safeNum(floor, 0);
+  if (f <= 0) {
+    return { verdict: 'UNKNOWN', reason: 'No minimum cacheable prefix is configured for this model in the rates block.' };
+  }
+  if (est.low >= f) {
+    return { verdict: 'PASS', reason: 'The whole estimated band (' + fmtInt(est.low) + ' to ' + fmtInt(est.high) + ' tokens) sits at or above the ' + fmtInt(f) + '-token minimum.' };
+  }
+  if (est.high < f) {
+    return { verdict: 'FAIL', reason: 'The whole estimated band (' + fmtInt(est.low) + ' to ' + fmtInt(est.high) + ' tokens) sits below the ' + fmtInt(f) + '-token minimum. A prefix under the minimum is silently not cached: no error is returned, and both usage counters stay at zero.' };
+  }
+  return { verdict: 'BORDERLINE', reason: 'The estimated band (' + fmtInt(est.low) + ' to ' + fmtInt(est.high) + ' tokens) straddles the ' + fmtInt(f) + '-token minimum, so a character heuristic cannot decide this. Confirm with the count_tokens endpoint before you act on it.' };
+}
+
+function auditBreakpoints(blocks, opts) {
+  var floor = safeNum(opts && opts.floor, 0);
+  var band = opts && opts.band;
+  var maxBp = safeNum(opts && opts.maxBreakpoints, 4);
+  var divergenceIndex = (opts && isFinite(opts.divergenceIndex)) ? opts.divergenceIndex : -1;
+  var topLevel = !!(opts && opts.topLevelCacheControl);
+
+  var markers = [];
+  var running = 0;
+  var prefixChars = [];
+  for (var i = 0; i < blocks.length; i++) {
+    running += blocks[i].serialized.length;
+    prefixChars.push(running);
+  }
+  for (var b = 0; b < blocks.length; b++) {
+    if (!blocks[b].hasCacheControl) continue;
+    var est = estimateTokens(prefixChars[b], band);
+    var v = verdictAgainstFloor(est, floor);
+    var relation = 'n/a';
+    if (divergenceIndex >= 0) {
+      if (b < divergenceIndex) relation = 'before';
+      else if (b === divergenceIndex) relation = 'at';
+      else relation = 'after';
+    }
+    markers.push({
+      blockIndex: blocks[b].index,
+      segment: blocks[b].segment,
+      type: blocks[b].type,
+      role: blocks[b].role,
+      label: blocks[b].label,
+      ttl: blocks[b].ttl,
+      explicitTtl: blocks[b].explicitTtl,
+      prefixChars: prefixChars[b],
+      estimate: est,
+      verdict: v.verdict,
+      reason: v.reason,
+      relationToDivergence: relation
+    });
+  }
+
+  var issues = [];
+  var count = markers.length;
+  if (count > maxBp) {
+    issues.push({
+      level: 'bad',
+      text: 'This body carries ' + count + ' explicit cache_control markers, which is more than the documented maximum of ' + fmtInt(maxBp) + '.'
+    });
+  }
+  if (count === maxBp && topLevel) {
+    issues.push({
+      level: 'bad',
+      text: 'This body carries a top-level cache_control (automatic caching) and already has ' + fmtInt(maxBp) + ' explicit block-level breakpoints. That combination is documented as a 400: there is no slot left for the automatic breakpoint.'
+    });
+  }
+  if (count === 0) {
+    if (topLevel) {
+      issues.push({
+        level: 'info',
+        text: 'No explicit breakpoints. A top-level cache_control is present, so the breakpoint is placed automatically on the last cacheable block. If that last block is the one that varies per request - a timestamp, the incoming user message - the entry is keyed to content that never repeats, so you pay a write on every request and never get a read. Put an explicit breakpoint on the last stable block instead.'
+      });
+    } else {
+      issues.push({
+        level: 'warn',
+        text: 'No cache_control anywhere in this body: no explicit breakpoints and no top-level automatic caching. Nothing is being cached at all.'
+      });
+    }
+  }
+  var has5 = false;
+  var has1 = false;
+  var firstFiveIdx = -1;
+  var lastHourIdx = -1;
+  for (var k = 0; k < markers.length; k++) {
+    if (markers[k].ttl === '1h') { has1 = true; lastHourIdx = k; }
+    else { has5 = true; if (firstFiveIdx === -1) firstFiveIdx = k; }
+  }
+  if (has5 && has1) {
+    var ordered = !(firstFiveIdx !== -1 && lastHourIdx !== -1 && lastHourIdx > firstFiveIdx);
+    issues.push({
+      level: ordered ? 'info' : 'bad',
+      text: ordered
+        ? 'This body mixes 5-minute and 1-hour markers. The documented constraint is that longer-TTL entries must appear before shorter-TTL ones, and this body satisfies it.'
+        : 'This body mixes 5-minute and 1-hour markers and a 1-hour marker appears after a 5-minute marker. The documented constraint is that cache entries with a longer TTL must appear before shorter ones.'
+    });
+  }
+  if (count > 0 && count < maxBp) {
+    issues.push({
+      level: 'info',
+      text: 'Using ' + count + ' of ' + fmtInt(maxBp) + ' breakpoint slots. ' + (maxBp - count) + ' remain, which is the budget available for intermediate breakpoints if the lookback check below reports a miss.'
+    });
+  }
+
+  return { markers: markers, issues: issues, count: count, maxBreakpoints: maxBp, totalChars: running };
+}
+
+/* Count backwards from the breakpoint, counting the breakpoint itself as
+   position 1, and report whether the prior entry falls inside the window. */
+function lookbackCheck(breakpointIndex, priorEntryIndex, windowSize) {
+  var w = Math.floor(safeNum(windowSize, 20));
+  if (w < 1) w = 1;
+  var top = Math.floor(safeNum(breakpointIndex, 0));
+  var bottom = top - (w - 1);
+  if (bottom < 0) bottom = 0;
+  if (!isFinite(priorEntryIndex) || priorEntryIndex === null || priorEntryIndex < 0) {
+    return {
+      window: w, top: top, bottom: bottom, priorEntryIndex: null,
+      covered: false, positionsOutside: null, hasPrior: false,
+      suggestedInterval: Math.max(1, w - 5)
+    };
+  }
+  var prior = Math.floor(priorEntryIndex);
+  var covered = prior >= bottom && prior <= top;
+  return {
+    window: w,
+    top: top,
+    bottom: bottom,
+    priorEntryIndex: prior,
+    covered: covered,
+    positionsOutside: covered ? 0 : Math.max(0, bottom - prior),
+    hasPrior: true,
+    suggestedInterval: Math.max(1, w - 5)
+  };
+}
+
+/* TTL clock. Lifetime runs from the START of the request that writes or
+   reads the entry, not from the end of its response. */
+function ttlClock(opts) {
+  var ttl = safeNum(opts && opts.ttlSeconds, 0);
+  var gap = safeNum(opts && opts.gapSeconds, 0);
+  var stream = safeNum(opts && opts.streamSeconds, 0);
+  if (ttl < 0) ttl = 0;
+  if (gap < 0) gap = 0;
+  if (stream < 0) stream = 0;
+  var span = Math.max(ttl, gap, stream, 1);
+  var pct = function (v) {
+    if (span <= 0) return 0;
+    var p = (v / span) * 100;
+    if (!isFinite(p)) return 0;
+    if (p < 0) return 0;
+    if (p > 100) return 100;
+    return p;
+  };
+  return {
+    ttlSeconds: ttl,
+    gapSeconds: gap,
+    streamSeconds: stream,
+    idleAfterResponse: gap - stream,
+    aliveAtNextStart: ttl > 0 && gap < ttl,
+    marginSeconds: ttl - gap,
+    deadBeforeResponseComplete: ttl > 0 && stream > ttl,
+    remainingWhenResponseCompletes: ttl - stream,
+    span: span,
+    pctTtl: pct(ttl),
+    pctStream: pct(stream),
+    pctNext: pct(gap)
+  };
+}
+
+/* Break-even is DERIVED from the multipliers, never hardcoded.
+   Cached prefix cost over N requests:  W + (N-1)R  (in units of base price)
+   Uncached prefix cost over N requests: N
+   Caching wins when W + (N-1)R < N, i.e. N > (W - R) / (1 - R). */
+function breakEvenRequests(writeMultiplier, readMultiplier) {
+  var w = Number(writeMultiplier);
+  var r = Number(readMultiplier);
+  if (!isFinite(w) || !isFinite(r)) {
+    return { ok: false, reason: 'Both multipliers must be finite numbers.' };
+  }
+  var denom = 1 - r;
+  if (denom <= 0) {
+    return { ok: false, reason: 'A read multiplier of 1 or more can never pay back a write premium, so there is no break-even request count.' };
+  }
+  var threshold = (w - r) / denom;
+  if (!isFinite(threshold)) {
+    return { ok: false, reason: 'Break-even is not finite for these multipliers.' };
+  }
+  /* The inequality is strict, so an exact tie is not a win: the smallest
+     winning N is the first integer strictly greater than the threshold.
+     The tolerance keeps a threshold that lands on an integer only because of
+     binary floating point (1.8 / 0.9 = 1.9999999999999998) from rounding down. */
+  var n = Math.floor(threshold + 1e-9) + 1;
+  if (n < 1) n = 1;
+  return { ok: true, threshold: threshold, n: n, writeMultiplier: w, readMultiplier: r };
+}
+
+function cacheEconomics(opts) {
+  var prefix = Math.max(0, Math.min(safeNum(opts && opts.prefixTokens, 0), 1e12));
+  var suffix = Math.max(0, Math.min(safeNum(opts && opts.suffixTokens, 0), 1e12));
+  var n = Math.max(0, Math.min(Math.floor(safeNum(opts && opts.requests, 0)), 1e9));
+  var w = safeNum(opts && opts.writeMultiplier, 0);
+  var r = safeNum(opts && opts.readMultiplier, 0);
+  var price = Math.max(0, safeNum(opts && opts.pricePerMTok, 0));
+
+  var uncachedUnits = n * prefix + n * suffix;
+  var cachedPrefixUnits = n >= 1 ? (prefix * w + (n - 1) * prefix * r) : 0;
+  var cachedUnits = cachedPrefixUnits + n * suffix;
+  var deltaUnits = uncachedUnits - cachedUnits;
+
+  var toUsd = function (units) {
+    var v = units * price / 1e6;
+    return isFinite(v) ? v : null;
+  };
+
+  return {
+    requests: n,
+    prefixTokens: prefix,
+    suffixTokens: suffix,
+    writeMultiplier: w,
+    readMultiplier: r,
+    pricePerMTok: price,
+    uncachedUnits: isFinite(uncachedUnits) ? uncachedUnits : null,
+    cachedUnits: isFinite(cachedUnits) ? cachedUnits : null,
+    deltaUnits: isFinite(deltaUnits) ? deltaUnits : null,
+    uncachedUsd: toUsd(uncachedUnits),
+    cachedUsd: toUsd(cachedUnits),
+    deltaUsd: toUsd(deltaUnits),
+    cachingWins: isFinite(deltaUnits) && deltaUnits > 0
+  };
+}
+
+/* Cache reads do not count toward ITPM on most models, so a hit rate is a
+   throughput multiplier as well as a discount. */
+function effectiveItpm(limit, hitRate, countsCacheReads) {
+  var l = Math.max(0, safeNum(limit, 0));
+  var h = safeNum(hitRate, 0);
+  if (h < 0) h = 0;
+  var capped = false;
+  if (h > 0.999) { h = 0.999; capped = true; }
+  if (countsCacheReads) {
+    return {
+      effective: l,
+      multiplier: 1,
+      hitRate: h,
+      capped: capped,
+      countsCacheReads: true,
+      note: 'This model is documented as counting cache reads toward its ITPM limit, so a cache hit is a price discount here but not a throughput multiplier.'
+    };
+  }
+  var denom = 1 - h;
+  if (denom <= 0) {
+    return { effective: null, multiplier: null, hitRate: h, capped: true, countsCacheReads: false, note: 'Hit rate too close to 1 to divide.' };
+  }
+  var eff = l / denom;
+  if (!isFinite(eff)) {
+    return { effective: null, multiplier: null, hitRate: h, capped: capped, countsCacheReads: false, note: 'Result is not finite.' };
+  }
+  return {
+    effective: eff,
+    multiplier: 1 / denom,
+    hitRate: h,
+    capped: capped,
+    countsCacheReads: false,
+    note: ''
+  };
+}
+
+function truncateForDisplay(text, head, tail) {
+  var s = String(text === null || text === undefined ? '' : text);
+  var h = isFinite(head) ? head : 220;
+  var t = isFinite(tail) ? tail : 120;
+  if (s.length <= h + t + 40) {
+    return { text: s, truncated: false, bytes: s.length };
+  }
+  return {
+    text: s.slice(0, h) + '\n... [' + fmtInt(s.length - h - t) + ' characters not shown] ...\n' + s.slice(s.length - t),
+    truncated: true,
+    bytes: s.length
+  };
+}
+
+/* ============================================================
+   DEFAULT RATES  (confirmed 2026-08-07 against the linked docs)
+   ============================================================ */
+
+function defaultRates() {
+  return {
+    as_of: '2026-08-07',
+    source_prompt_caching: 'https://platform.claude.com/docs/en/build-with-claude/prompt-caching',
+    source_rate_limits: 'https://platform.claude.com/docs/en/api/rate-limits',
+    write_multiplier_5m: 1.25,
+    write_multiplier_1h: 2,
+    read_multiplier: 0.1,
+    max_explicit_breakpoints: 4,
+    lookback_window_blocks: 20,
+    ttl_seconds: { '5m': 300, '1h': 3600 },
+    chars_per_token: { min: 3.2, max: 4.4 },
+    models: {
+      'claude-opus-5':     { label: 'Opus 5',     min_cacheable_tokens: 512,  base_input_per_mtok: 5,    cache_read_counts_toward_itpm: false },
+      'claude-fable-5':    { label: 'Fable 5',    min_cacheable_tokens: 512,  base_input_per_mtok: 10,   cache_read_counts_toward_itpm: false },
+      'claude-mythos-5':   { label: 'Mythos 5',   min_cacheable_tokens: 512,  base_input_per_mtok: 10,   cache_read_counts_toward_itpm: false },
+      'claude-opus-4-8':   { label: 'Opus 4.8',   min_cacheable_tokens: 1024, base_input_per_mtok: 5,    cache_read_counts_toward_itpm: false },
+      'claude-opus-4-7':   { label: 'Opus 4.7',   min_cacheable_tokens: 2048, base_input_per_mtok: 5,    cache_read_counts_toward_itpm: false },
+      'claude-opus-4-6':   { label: 'Opus 4.6',   min_cacheable_tokens: 4096, base_input_per_mtok: 5,    cache_read_counts_toward_itpm: false },
+      'claude-opus-4-5':   { label: 'Opus 4.5',   min_cacheable_tokens: 4096, base_input_per_mtok: 5,    cache_read_counts_toward_itpm: false },
+      'claude-sonnet-5':   { label: 'Sonnet 5',   min_cacheable_tokens: 1024, base_input_per_mtok: 2,    cache_read_counts_toward_itpm: false, price_note: 'Introductory rate through 2026-08-31; 3 per MTok from 2026-09-01.' },
+      'claude-sonnet-4-6': { label: 'Sonnet 4.6', min_cacheable_tokens: 1024, base_input_per_mtok: 3,    cache_read_counts_toward_itpm: false },
+      'claude-sonnet-4-5': { label: 'Sonnet 4.5', min_cacheable_tokens: 1024, base_input_per_mtok: 3,    cache_read_counts_toward_itpm: false },
+      'claude-haiku-4-5':  { label: 'Haiku 4.5',  min_cacheable_tokens: 4096, base_input_per_mtok: 1,    cache_read_counts_toward_itpm: false },
+      'claude-haiku-3-5':  { label: 'Haiku 3.5',  min_cacheable_tokens: 2048, base_input_per_mtok: 0.8,  cache_read_counts_toward_itpm: true,  itpm_note: 'Documented exception: this model does count cache reads toward ITPM.', price_note: 'Retired on the Claude API; still served on Amazon Bedrock and Google Cloud. The price here is its last published Claude API rate - check your own platform before relying on it.' }
+    },
+    models_documented_elsewhere: {
+      note: 'Documented minimums for models this tool does not ship a price for. Floors confirmed on the same date as the rest of this block.',
+      'claude-mythos-preview': 2048,
+      'claude-opus-4-1': 1024,
+      'claude-opus-4': 1024,
+      'claude-sonnet-4': 1024
+    }
+  };
+}
+
+/* ============================================================
+   SAMPLE  (synthetic; built to fire all four traps at once)
+   ============================================================ */
+
+function sampleSystemFrozen() {
+  return [
+    'You are a coding agent operating inside a customer repository. You have read and write access through the tools provided. Follow the operating rules below exactly.',
+    '',
+    'SCOPE. Work only inside the repository root you were given. Never read, write, or execute anything outside it. Never modify files under .git, node_modules, dist, or build. If a task appears to require touching those paths, stop and explain why instead of proceeding.',
+    '',
+    'READING BEFORE WRITING. Always read a file before you edit it. Never edit a file whose current contents you have not seen in this session. If a file changed since you last read it, read it again before applying an edit. Quote the exact lines you are changing in your explanation so a reviewer can follow the change without opening the file.',
+    '',
+    'TESTS. Every behavioral change ships with a test. Add the test in the same commit as the change. Run the test suite before you report the work as complete, and paste the failing output verbatim if it fails. Do not report a task as done on the strength of a passing type check alone. If a test is flaky, say so and show both runs rather than rerunning until it passes.',
+    '',
+    'SCOPE DISCIPLINE. Deliver what was asked at the scope that was asked. Do not refactor surrounding code, rename symbols, reformat files, add abstractions, or introduce dependencies that the task did not require. If you believe a larger change is warranted, say so in one sentence and continue with the task as specified.',
+    '',
+    'ERROR HANDLING. Add error handling only at real boundaries: user input, network calls, filesystem access, and parsing of external data. Do not add defensive branches for states that cannot occur inside this codebase. Do not swallow errors. Do not add retry logic to an operation that is not idempotent.',
+    '',
+    'COMMUNICATION. Lead with the outcome. The first sentence of your final message answers what happened or what you found. Supporting detail comes after. Use complete sentences and spell out identifiers rather than packing several into one parenthetical. Between tool calls, write only when you find something load-bearing, change direction, or hit a blocker.',
+    '',
+    'COMMITS. Write commit messages in the imperative mood with a one-line subject under 72 characters and a body that explains why the change was needed. Do not reference this session, the task tracker, or your own process in the commit message.',
+    '',
+    'DEPENDENCIES. Do not add a dependency to solve a problem the standard library already solves. If a dependency is genuinely required, name it, state its license, and state the size it adds, then wait for confirmation before installing.',
+    '',
+    'PERFORMANCE. Do not optimize without a measurement. If you believe a path is hot, show the measurement that says so before changing it. Prefer clarity to cleverness in code a human will review.',
+    '',
+    'STYLE. Match the surrounding code. Copy its naming conventions, comment density, import ordering, and error idioms rather than importing conventions from elsewhere. Write a comment only to record a constraint the code cannot express on its own, never to restate what the next line does.',
+    '',
+    'SECRETS. Never print, log, or write a credential. If you encounter what looks like a key, token, or password in the repository, stop, report the file and line, and do not include the value itself in your message.',
+    '',
+    'REVIEW. Assume a human will review every line you write. Keep diffs small and legible. If a change is unavoidably large, split it into commits that each stand on their own.',
+    '',
+    'STOPPING. Finish the whole task before reporting completion. If you genuinely cannot finish part of it, complete the rest and state plainly what is missing and why. Do not end a turn with a plan you did not execute.'
+  ].join('\n');
+}
+
+function sampleTools() {
+  return {
+    read_file: {
+      name: 'read_file',
+      description: 'Read a UTF-8 text file from the repository and return its contents with line numbers. Use this before editing any file.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Repository-relative path, for example src/retry/budget.ts' },
+          start_line: { type: 'integer', description: 'First line to return, 1-indexed.' },
+          end_line: { type: 'integer', description: 'Last line to return, inclusive.' }
+        },
+        required: ['path']
+      }
+    },
+    list_directory: {
+      name: 'list_directory',
+      description: 'List files and subdirectories at a repository-relative path. Returns names, sizes in bytes, and whether each entry is a directory.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Repository-relative directory path. Use an empty string for the repository root.' },
+          recursive: { type: 'boolean', description: 'Walk subdirectories. Defaults to false.' }
+        },
+        required: ['path']
+      }
+    },
+    run_tests: {
+      name: 'run_tests',
+      description: 'Run the project test suite and return the summary plus any failing test output. Never run this against the production configuration.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Test name or file pattern to filter on. Omit to run the whole suite.' },
+          timeout_seconds: { type: 'integer', description: 'Hard timeout for the run in seconds. Defaults to 600.' }
+        },
+        required: []
+      }
+    },
+    search_code: {
+      name: 'search_code',
+      description: 'Search the repository with a regular expression and return matching file paths with line numbers and the matching line.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'A regular expression in RE2 syntax.' },
+          glob: { type: 'string', description: 'Restrict the search to paths matching this glob, for example src/**/*.ts' },
+          max_results: { type: 'integer', description: 'Cap on the number of returned matches. Defaults to 100.' }
+        },
+        required: ['pattern']
+      }
+    }
+  };
+}
+
+function buildSampleBodies() {
+  var T = sampleTools();
+  var frozen = sampleSystemFrozen();
+  var MODEL = 'claude-opus-4-8';
+
+  function head(toolOrder, volatileText) {
+    return {
+      model: MODEL,
+      max_tokens: 8192,
+      tools: toolOrder.map(function (k) { return T[k]; }),
+      system: [
+        { type: 'text', text: frozen },
+        { type: 'text', text: volatileText, cache_control: { type: 'ephemeral' } }
+      ]
+    };
+  }
+
+  var openingTurns = [
+    { role: 'user', content: [{ type: 'text', text: 'Find where the retry budget is enforced and add a unit test for the exhausted-budget path.' }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_demo_01', name: 'search_code', input: { pattern: 'retry[_ ]?budget', glob: 'src/**/*.ts' } }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_demo_01', content: 'src/retry/budget.ts:14: export class RetryBudget {\nsrc/retry/budget.ts:31:   consume(cost: number): boolean {\nsrc/transport/send.ts:88:   if (!budget.consume(1)) throw new BudgetExhausted();' }] }
+  ];
+
+  var bodyN = head(['read_file', 'list_directory', 'run_tests', 'search_code'],
+    'Current date: 2026-08-07T14:32:11Z\nSession: sess-demo-0007\nTurn counter: 12');
+  bodyN.messages = openingTurns.concat([
+    {
+      role: 'assistant',
+      content: [{
+        type: 'text',
+        text: 'The budget is enforced in src/transport/send.ts at line 88, through RetryBudget.consume. I will read both files before writing the test.',
+        cache_control: { type: 'ephemeral' }
+      }]
+    }
+  ]);
+
+  var steps = [
+    ['read_file',      { path: 'src/retry/budget.ts' },            '14 export class RetryBudget {\n31   consume(cost: number): boolean {\n38     if (this.remaining <= 0) return false;'],
+    ['read_file',      { path: 'src/transport/send.ts' },          '80 async function send(req: Request) {\n88   if (!budget.consume(1)) throw new BudgetExhausted();'],
+    ['list_directory', { path: 'src/retry', recursive: false },    'budget.ts 2841\nindex.ts 412\npolicy.ts 1907\nbudget.test.ts 1233'],
+    ['read_file',      { path: 'src/retry/budget.test.ts' },       '1 import { RetryBudget } from "./budget";\n7 test("consumes until empty", () => {'],
+    ['search_code',    { pattern: 'BudgetExhausted', glob: 'src/**/*.ts' }, 'src/errors.ts:22: export class BudgetExhausted extends Error {\nsrc/transport/send.ts:88'],
+    ['read_file',      { path: 'src/errors.ts' },                  '22 export class BudgetExhausted extends Error {\n23   readonly retryable = false;'],
+    ['search_code',    { pattern: 'new RetryBudget', glob: 'src/**/*.ts' }, 'src/transport/send.ts:41: const budget = new RetryBudget(cfg.maxRetries);'],
+    ['read_file',      { path: 'src/transport/send.test.ts' },     '1 import { send } from "./send";\n12 test("retries on 503", async () => {'],
+    ['list_directory', { path: 'src/transport', recursive: false },'send.ts 5120\nsend.test.ts 3044\nheaders.ts 880'],
+    ['search_code',    { pattern: 'maxRetries', glob: 'src/**/*.ts' }, 'src/config.ts:19: maxRetries: number;\nsrc/transport/send.ts:41'],
+    ['read_file',      { path: 'src/config.ts' },                  '19   maxRetries: number;\n20   timeoutMs: number;'],
+    ['run_tests',      { pattern: 'retry', timeout_seconds: 120 }, '4 passed, 0 failed in 1.8s']
+  ];
+
+  var appended = [];
+  for (var i = 0; i < steps.length; i++) {
+    var n = i + 2;
+    var id = 'toolu_demo_' + (n < 10 ? '0' + n : String(n));
+    appended.push({ role: 'assistant', content: [{ type: 'tool_use', id: id, name: steps[i][0], input: steps[i][1] }] });
+    appended.push({ role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: steps[i][2] }] });
+  }
+  appended.push({
+    role: 'assistant',
+    content: [{ type: 'text', text: 'I have the full picture: RetryBudget.consume is called once per attempt in send at line 88, and BudgetExhausted is thrown when the budget is empty. No test covers the exhausted path today.' }]
+  });
+
+  var bodyN1 = head(['list_directory', 'read_file', 'run_tests', 'search_code'],
+    'Current date: 2026-08-07T14:39:02Z\nSession: sess-demo-0008\nTurn counter: 13');
+  bodyN1.messages = openingTurns.concat([
+    {
+      role: 'assistant',
+      content: [{
+        type: 'text',
+        text: 'The budget is enforced in src/transport/send.ts at line 88, through RetryBudget.consume. I will read both files before writing the test.'
+      }]
+    }
+  ]).concat(appended).concat([
+    {
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: 'Good. Now write the test for the exhausted-budget path and run it.',
+        cache_control: { type: 'ephemeral' }
+      }]
+    }
+  ]);
+
+  return {
+    n: JSON.stringify(bodyN, null, 2),
+    nPlus1: JSON.stringify(bodyN1, null, 2),
+    gapSeconds: 440,
+    streamSeconds: 380,
+    ttl: '5m',
+    itpmLimit: 2000000
+  };
+}
+
+/* ============================================================
+   DOM LAYER
+   ============================================================ */
+
+(function () {
+  if (typeof document === 'undefined') return;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var rates = defaultRates();
+  var ratesOk = true;
+  var lastAnalysis = null;
+  var debounceTimer = null;
+  var userTouchedModel = false;
+  var userTouchedTtl = false;
+
+  /* ---------- theme ---------- */
+  function currentTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  }
+  function applyTheme(theme) {
+    var t = theme === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+    var btn = $('themeBtn');
+    btn.textContent = t === 'dark' ? 'Switch to light' : 'Switch to dark';
+    btn.setAttribute('aria-pressed', t === 'light' ? 'true' : 'false');
+    try { window.localStorage.setItem('pci-theme', t); } catch (e) { /* storage blocked */ }
+  }
+  applyTheme(currentTheme());
+  $('themeBtn').addEventListener('click', function () {
+    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+  });
+
+  /* ---------- copy buttons ---------- */
+  function flash(btn, text) {
+    var original = btn.getAttribute('data-orig') || btn.textContent;
+    btn.setAttribute('data-orig', original);
+    btn.textContent = text;
+    window.setTimeout(function () { btn.textContent = original; }, 1400);
+  }
+  function copyText(text, btn) {
+    var done = function () { flash(btn, 'Copied'); };
+    var fail = function () { flash(btn, 'Copy failed'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { legacyCopy(text) ? done() : fail(); });
+      return;
+    }
+    if (legacyCopy(text)) done(); else fail();
+  }
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', 'readonly');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  }
+  document.addEventListener('click', function (ev) {
+    var btn = ev.target && ev.target.closest ? ev.target.closest('[data-copy]') : null;
+    if (!btn) return;
+    var srcId = btn.getAttribute('data-copy');
+    var payload = '';
+    if (srcId === '__report') {
+      payload = lastAnalysis ? lastAnalysis.report : 'No analysis has been run yet.';
+    } else {
+      var src = $(srcId);
+      payload = src ? (typeof src.value === 'string' ? src.value : src.textContent) : '';
+    }
+    copyText(payload, btn);
+  });
+
+  /* ---------- rates ---------- */
+  function ratesModels() { return toLookup(rates && rates.models); }
+
+  function loadRatesFromBox() {
+    var text = $('ratesBox').value;
+    try {
+      var parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('The rates block must be a JSON object.');
+      rates = parsed;
+      ratesOk = true;
+      $('ratesStatus').innerHTML = '<span style="color:var(--good)">Rates block parsed. Every priced number and floor verdict on this page now comes from it.</span>';
+    } catch (err) {
+      ratesOk = false;
+      $('ratesStatus').innerHTML = '<span class="err">Rates block is not valid JSON: ' + escapeHtml(err && err.message ? err.message : String(err)) + '. The last valid rates are still in use.</span>';
+    }
+    rebuildModelOptions();
+  }
+
+  function writeRatesBox(obj) {
+    $('ratesBox').value = JSON.stringify(obj, null, 2);
+  }
+
+  function rebuildModelOptions() {
+    var sel = $('modelSel');
+    var previous = sel.value;
+    var models = ratesModels();
+    var keys = Object.keys(models);
+    var html = '';
+    for (var i = 0; i < keys.length; i++) {
+      var m = lookupGet(models, keys[i]);
+      var label = (m && typeof m.label === 'string') ? m.label : keys[i];
+      var floor = m ? safeNum(m.min_cacheable_tokens, 0) : 0;
+      html += '<option value="' + escapeHtml(keys[i]) + '">' + escapeHtml(label) + ' (' + fmtInt(floor) + ' token minimum)</option>';
+    }
+    html += '<option value="__custom">Custom (type your own floor)</option>';
+    sel.innerHTML = html;
+    if (previous && (lookupHas(models, previous) || previous === '__custom')) sel.value = previous;
+    else if (lookupHas(models, 'claude-opus-4-8')) sel.value = 'claude-opus-4-8';
+    toggleCustom();
+  }
+
+  function toggleCustom() {
+    $('customWrap').hidden = $('modelSel').value !== '__custom';
+  }
+
+  function activeModel() {
+    var key = $('modelSel').value;
+    if (key === '__custom') {
+      return {
+        key: '__custom',
+        label: 'Custom',
+        floor: Math.max(0, safeNum($('customFloor').value, 0)),
+        price: Math.max(0, safeNum($('customPrice').value, 0)),
+        countsCacheReads: false,
+        note: 'Custom floor and price supplied by you, not from the rates table.'
+      };
+    }
+    var models = ratesModels();
+    var m = lookupGet(models, key);
+    if (!m || typeof m !== 'object') {
+      return { key: key, label: key, floor: 0, price: 0, countsCacheReads: false, note: 'This model key is not in the rates block.' };
+    }
+    return {
+      key: key,
+      label: typeof m.label === 'string' ? m.label : key,
+      floor: safeNum(m.min_cacheable_tokens, 0),
+      price: safeNum(m.base_input_per_mtok, 0),
+      countsCacheReads: m.cache_read_counts_toward_itpm === true,
+      note: [m.price_note, m.itpm_note].filter(Boolean).join(' ')
+    };
+  }
+
+  function activeTtlKey() { return $('ttl1h').checked ? '1h' : '5m'; }
+
+  function ttlSeconds(key) {
+    var t = toLookup(rates && rates.ttl_seconds);
+    var v = safeNum(lookupGet(t, key), key === '1h' ? 3600 : 300);
+    return v > 0 ? v : (key === '1h' ? 3600 : 300);
+  }
+
+  function writeMultiplier(key) {
+    return key === '1h' ? safeNum(rates && rates.write_multiplier_1h, 2) : safeNum(rates && rates.write_multiplier_5m, 1.25);
+  }
+  function readMultiplier() { return safeNum(rates && rates.read_multiplier, 0.1); }
+  function band() {
+    var b = rates && rates.chars_per_token;
+    return { min: safeNum(b && b.min, 3.2), max: safeNum(b && b.max, 4.4) };
+  }
+  function maxBreakpoints() { return Math.max(1, Math.floor(safeNum(rates && rates.max_explicit_breakpoints, 4))); }
+  function lookbackWindow() { return Math.max(1, Math.floor(safeNum(rates && rates.lookback_window_blocks, 20))); }
+  function ratesDate() { return (rates && typeof rates.as_of === 'string') ? rates.as_of : 'unknown date'; }
+
+  /* ---------- html helpers ---------- */
+  function zoneExact() { return '<span class="zone z-exact"><span class="dot"></span>Computed from your input</span>'; }
+  function zoneRates() { return '<span class="zone z-rates"><span class="dot"></span>From the rates table (' + escapeHtml(ratesDate()) + ')</span>'; }
+  function panel(title, zoneHtml, bodyHtml, id) {
+    return '<section class="panel"' + (id ? ' id="' + escapeHtml(id) + '"' : '') + '>' +
+      '<div class="panelhead"><h2>' + escapeHtml(title) + '</h2>' + (zoneHtml || '') + '</div>' + bodyHtml + '</section>';
+  }
+  function verdictChip(v) {
+    if (v === 'PASS') return '<span class="v v-pass">PASS</span>';
+    if (v === 'FAIL') return '<span class="v v-fail">FAIL</span>';
+    if (v === 'BORDERLINE') return '<span class="v v-border">BORDERLINE</span>';
+    return '<span class="v v-info">' + escapeHtml(v) + '</span>';
+  }
+  function noteHtml(level, html) {
+    var cls = level === 'bad' ? 'bad' : level === 'good' ? 'good' : level === 'warn' ? 'warn' : level === 'rates' ? 'rates' : 'info';
+    return '<div class="note ' + cls + ' small">' + html + '</div>';
+  }
+  function blockName(b) {
+    var bits = [b.segment];
+    if (b.role) bits.push(b.role);
+    bits.push(b.type);
+    return bits.join(' / ');
+  }
+  function contextHtml(serialized, offset, width) {
+    var w = isFinite(width) ? width : 120;
+    var start = Math.max(0, offset - w);
+    var end = Math.min(serialized.length, offset + w);
+    var before = serialized.slice(start, offset);
+    var after = serialized.slice(offset, end);
+    return '<div class="ctx">' +
+      (start > 0 ? '<span class="pre">... </span>' : '') +
+      '<span class="pre">' + escapeHtml(before) + '</span>' +
+      '<span class="cut" aria-hidden="true"></span>' +
+      '<span class="post">' + escapeHtml(after) + '</span>' +
+      (end < serialized.length ? '<span class="pre"> ...</span>' : '') +
+      '</div>';
+  }
+
+  /* ---------- analysis ---------- */
+  function analyse() {
+    var single = $('singleMode').checked;
+    var rawA = $('bodyA').value;
+    var rawB = $('bodyB').value;
+    var out = $('out');
+    var reportLines = [];
+
+    var pa = parseBody(rawA);
+    var pb = single ? null : parseBody(rawB);
+
+    $('metaA').textContent = describeParse(pa);
+    $('metaB').textContent = single ? 'Single request mode: request N+1 is not used.' : describeParse(pb);
+
+    if (!pa.ok && pa.empty && (single || (pb && pb.empty))) {
+      out.innerHTML = '<div class="panel"><div class="empty">Paste a request body above, or press <strong>Load sample</strong> to see a synthetic two-turn coding-agent pair that fires four separate cache traps at once: a tool reorder that kills the prefix at block 0, a timestamp in the system prompt, twenty-four appended tool_use and tool_result blocks that push the breakpoint outside the lookback window, and a five-minute entry that expired before the previous response finished streaming.</div></div>';
+      setStatus('Waiting for input.');
+      return;
+    }
+
+    var html = '';
+
+    if (!pa.ok) {
+      html += panel('Request N could not be parsed', zoneExact(), parseErrorHtml(pa, 'N'));
+      out.innerHTML = html;
+      setStatus('Request N did not parse.');
+      return;
+    }
+    if (!single && pb && !pb.ok) {
+      html += panel('Request N+1 could not be parsed', zoneExact(), parseErrorHtml(pb, 'N+1'));
+      out.innerHTML = html;
+      setStatus('Request N+1 did not parse.');
+      return;
+    }
+
+    var provA = detectProvider(pa.value);
+    var renderA = renderBlocks(pa.value);
+    var renderB = (!single && pb && pb.ok) ? renderBlocks(pb.value) : null;
+    var provB = (!single && pb && pb.ok) ? detectProvider(pb.value) : null;
+
+    if (!userTouchedModel) autoSelectModel(pa.value, (!single && pb && pb.ok) ? pb.value : null);
+    if (!userTouchedTtl) autoSelectTtl(renderA, renderB);
+
+    var model = activeModel();
+    var ttlKey = activeTtlKey();
+    var bp = band();
+
+    /* provider warnings */
+    var provNotes = '';
+    if (provA.kind === 'other' || (provB && provB.kind === 'other')) {
+      var why = provA.kind === 'other' ? provA.reason : provB.reason;
+      provNotes += noteHtml('bad', '<p><strong>This does not look like an Anthropic Messages body.</strong> ' + escapeHtml(why) + ' This tool models Anthropic prefix caching only. Other providers cache differently, and none of the render order, floors, multipliers or lookback arithmetic here transfers to them. The block walk below still ran, but read it as a structural diff, not as a caching verdict.</p>');
+    } else if (provA.kind === 'unclear' || (provB && provB.kind === 'unclear')) {
+      provNotes += noteHtml('warn', '<p>' + escapeHtml(provA.kind === 'unclear' ? provA.reason : provB.reason) + '</p>');
+    }
+    if (pa.stripNote) provNotes += noteHtml('info', '<p><strong>Request N:</strong> ' + escapeHtml(pa.stripNote) + '</p>');
+    if (pb && pb.stripNote) provNotes += noteHtml('info', '<p><strong>Request N+1:</strong> ' + escapeHtml(pb.stripNote) + '</p>');
+
+    var structNotes = renderA.notes.slice();
+    if (renderB) {
+      for (var sn = 0; sn < renderB.notes.length; sn++) {
+        if (structNotes.indexOf(renderB.notes[sn]) === -1) structNotes.push(renderB.notes[sn]);
+      }
+    }
+    var structHtml = '';
+    for (var s2 = 0; s2 < structNotes.length; s2++) {
+      structHtml += noteHtml('warn', '<p>' + escapeHtml(structNotes[s2]) + '</p>');
+    }
+
+    /* ---- render summary ---- */
+    var renderSummary = '<p class="small">Blocks are walked in the documented render order: every entry of <code>tools</code> in array order, then <code>system</code>, then every content block of every message in order. This is a render-order walk, not a JSON diff. A pretty-printed diff of two bodies can look harmless while the render order shows the prefix dying at block 0.</p>';
+    renderSummary += '<div class="grid3">';
+    renderSummary += statTile('Blocks in request N', fmtInt(renderA.blocks.length));
+    if (renderB) renderSummary += statTile('Blocks in request N+1', fmtInt(renderB.blocks.length));
+    renderSummary += statTile('Model in use', escapeHtml(model.label) + ' / floor ' + fmtInt(model.floor));
+    renderSummary += '</div>';
+    renderSummary += provNotes + structHtml;
+    renderSummary += blockTableHtml(renderA.blocks, renderB ? renderB.blocks : null);
+    html += panel('Canonical render', zoneExact(), renderSummary, 'render');
+    reportLines.push('Blocks: N=' + renderA.blocks.length + (renderB ? (', N+1=' + renderB.blocks.length) : ''));
+
+    /* ---- divergence + diagnosis ---- */
+    var cmp = null;
+    var diag = null;
+    if (renderB) {
+      cmp = compareRenders(renderA.blocks, renderB.blocks);
+      diag = classifyDivergence(cmp, renderA.blocks, renderB.blocks, pa.value, pb.value);
+      html += divergencePanel(cmp, diag, renderA, renderB, pa.value, pb.value, reportLines);
+    }
+
+    var divergenceIndex = (cmp && cmp.kind === 'divergence') ? cmp.blockIndex : -1;
+
+    /* ---- breakpoint audit ---- */
+    var auditA = auditBreakpoints(renderA.blocks, {
+      floor: model.floor, band: bp, maxBreakpoints: maxBreakpoints(),
+      divergenceIndex: divergenceIndex, topLevelCacheControl: renderA.topLevel.present
+    });
+    var auditB = renderB ? auditBreakpoints(renderB.blocks, {
+      floor: model.floor, band: bp, maxBreakpoints: maxBreakpoints(),
+      divergenceIndex: divergenceIndex, topLevelCacheControl: renderB.topLevel.present
+    }) : null;
+    html += breakpointPanel(auditA, auditB, model, bp, reportLines);
+
+    /* ---- lookback ---- */
+    html += lookbackPanel(auditA, auditB, divergenceIndex, reportLines, single);
+
+    /* ---- TTL ---- */
+    var clock = ttlClock({
+      ttlSeconds: ttlSeconds(ttlKey),
+      gapSeconds: safeNum($('gapSec').value, 0),
+      streamSeconds: safeNum($('streamSec').value, 0)
+    });
+    html += ttlPanel(clock, ttlKey, reportLines);
+
+    /* ---- economics ---- */
+    html += economicsPanel(pickPrefixBand(auditA, renderA, bp), pickSuffixBand(auditA, renderA, bp), ttlKey, model, reportLines);
+
+    /* ---- ITPM ---- */
+    html += itpmPanel(model, reportLines);
+
+    /* ---- invalidator scan ---- */
+    html += invalidatorPanel(renderA, renderB, single, reportLines);
+
+    out.innerHTML = html;
+    lastAnalysis = { report: reportLines.join('\n') };
+    setStatus('Analysis complete.');
+  }
+
+  function statTile(k, v) {
+    return '<div class="stat"><div class="k">' + escapeHtml(k) + '</div><div class="val">' + v + '</div></div>';
+  }
+
+  function describeParse(p) {
+    if (!p) return '';
+    if (p.empty) return 'No body loaded.';
+    if (!p.ok) return 'Did not parse.';
+    return 'Parsed. ' + fmtInt(String(p.text || '').length) + ' characters.';
+  }
+
+  function parseErrorHtml(p, which) {
+    var h = '<p class="small">The body for request ' + escapeHtml(which) + ' is not valid JSON. Nothing below could be computed from it. The page is intact; fix the body and press Analyze again.</p>';
+    var loc = p.error && p.error.location;
+    h += '<div class="err">' + escapeHtml(p.error ? p.error.message : 'Unknown parse error.') + '</div>';
+    if (loc) {
+      h += '<p class="small" style="margin-top:8px">Line <strong>' + fmtInt(loc.line) + '</strong>, column <strong>' + fmtInt(loc.column) + '</strong> (character offset ' + fmtInt(loc.index) + ').</p>';
+    } else {
+      h += '<p class="small" style="margin-top:8px">The JSON parser did not report a character offset for this error, so no line and column could be derived.</p>';
+    }
+    if (p.stripNote) h += noteHtml('info', '<p>' + escapeHtml(p.stripNote) + '</p>');
+    return h;
+  }
+
+  function blockTableHtml(a, b) {
+    var cap = 220;
+    var n = Math.max(a.length, b ? b.length : 0);
+    var shown = Math.min(n, cap);
+    var rows = '';
+    for (var i = 0; i < shown; i++) {
+      var x = a[i];
+      var y = b ? b[i] : null;
+      var same = (x && y) ? blocksMatch(x, y) : null;
+      var mark = '';
+      if (b) {
+        if (!x || !y) mark = '<span class="v v-info">only one side</span>';
+        else mark = same ? '<span class="v v-pass">same</span>' : '<span class="v v-fail">differs</span>';
+      }
+      var ref = x || y;
+      var preview = truncateForDisplay(ref.serialized, 96, 30);
+      rows += '<tr>' +
+        '<td class="num">' + i + '</td>' +
+        '<td>' + escapeHtml(blockName(ref)) + (ref.label ? '<br><span class="sub mono">' + escapeHtml(ref.label) + '</span>' : '') + '</td>' +
+        '<td class="num">' + (x ? fmtInt(x.serialized.length) : '-') + '</td>' +
+        (b ? '<td class="num">' + (y ? fmtInt(y.serialized.length) : '-') + '</td>' : '') +
+        '<td>' + ((x && x.hasCacheControl) || (y && y.hasCacheControl)
+          ? '<span class="chip">' + escapeHtml((x && x.ttl) || (y && y.ttl) || '5m') + '</span>' : '') + '</td>' +
+        (b ? '<td>' + mark + '</td>' : '') +
+        '<td class="mono" style="max-width:340px;word-break:break-all">' + escapeHtml(preview.text.replace(/\n/g, ' ')) + '</td>' +
+        '</tr>';
+    }
+    var head = '<tr><th class="num">#</th><th>Block</th><th class="num">Bytes N</th>' +
+      (b ? '<th class="num">Bytes N+1</th>' : '') +
+      '<th>cache_control</th>' + (b ? '<th>Match</th>' : '') + '<th>Preview</th></tr>';
+    var more = n > cap ? '<p class="sub small">Showing the first ' + cap + ' of ' + fmtInt(n) + ' blocks. The comparison itself ran over all of them; only the rendered table is capped so the page stays responsive.</p>' : '';
+    return '<div class="tablewrap"><table><thead>' + head + '</thead><tbody>' + rows + '</tbody></table></div>' + more;
+  }
+
+  function divergencePanel(cmp, diag, renderA, renderB, bodyA, bodyB, reportLines) {
+    var h = '';
+    /* A body of literal null is valid JSON, so guard before reading a field. */
+    var modelA = (bodyA && typeof bodyA.model === 'string') ? bodyA.model : null;
+    var modelB = (bodyB && typeof bodyB.model === 'string') ? bodyB.model : null;
+    var modelChanged = modelA && modelB && modelA !== modelB;
+
+    if (modelChanged) {
+      h += noteHtml('bad', '<p><strong>Model change.</strong> Request N names <code>' + escapeHtml(modelA) + '</code> and request N+1 names <code>' + escapeHtml(modelB) + '</code>. Cache entries are scoped to a model, so this alone guarantees a full miss regardless of anything else on this page. There is no escape hatch for a model switch: if you need a cheaper model for a sub-task, spawn a separate call for it and keep the main loop on one model.</p>');
+      reportLines.push('MODEL CHANGE: ' + modelA + ' -> ' + modelB);
+    }
+
+    if (cmp.kind === 'identical') {
+      h += noteHtml('good', '<p><strong>Prefixes identical.</strong> The two bodies render to the same ' + fmtInt(cmp.commonBlocks) + ' blocks, byte for byte. This would be a full cache hit. If you are seeing a miss anyway, the cause is not in the bytes - it is one of: the <a href="#ttl">TTL clock</a>, the <a href="#lookback">20-block lookback window</a>, a model change, or the prefix <a href="#breakpoints">falling under the model floor</a>.</p>');
+      h += '<p class="anchorlinks small"><a href="#ttl">Check the TTL clock</a><a href="#lookback">Check the lookback window</a><a href="#breakpoints">Check the floor</a></p>';
+      reportLines.push('DIVERGENCE: none. Prefixes identical across ' + cmp.commonBlocks + ' blocks.');
+      return panel('Divergence', zoneExact(), h, 'divergence');
+    }
+
+    if (cmp.kind === 'append') {
+      h += noteHtml('good', '<p><strong>Clean append: prefix intact through block ' + fmtInt(cmp.intactThrough) + '.</strong> The first ' + fmtInt(cmp.commonBlocks) + ' blocks are byte-identical and request ' + escapeHtml(cmp.longer) + ' simply has ' + fmtInt(cmp.extra) + ' more block' + (cmp.extra === 1 ? '' : 's') + ' after them. Nothing in the shared prefix changed. If you are still not getting a read, the cause is the lookback window, the TTL, the floor, or a model change rather than the content.</p>');
+      h += '<p class="anchorlinks small"><a href="#lookback">Check the lookback window</a><a href="#ttl">Check the TTL clock</a><a href="#breakpoints">Check the floor</a></p>';
+      reportLines.push('DIVERGENCE: clean append. Prefix intact through block ' + cmp.intactThrough + '.');
+      return panel('Divergence', zoneExact(), h, 'divergence');
+    }
+
+    var a = cmp.a;
+    var b = cmp.b;
+    h += '<div class="grid3">';
+    h += statTile('First divergence at block', fmtInt(cmp.blockIndex));
+    h += statTile('Segment / type', escapeHtml(blockName(a)));
+    h += statTile('Byte offset inside that block', fmtInt(cmp.byteOffset));
+    h += '</div>';
+    h += '<p class="small" style="margin-top:10px">' +
+      (cmp.blockIndex === 0
+        ? 'The very first block already differs, so there is no common prefix at all.'
+        : (cmp.blockIndex === 1
+          ? 'Block 0 is byte-identical.'
+          : 'Blocks 0 through ' + fmtInt(cmp.blockIndex - 1) + ' are byte-identical.')) +
+      ' Everything from block ' + fmtInt(cmp.blockIndex) + ' onward is a different prefix hash, so no breakpoint at or after that position can produce a read.</p>';
+
+    h += '<h3 style="margin-top:14px">Request N, around the divergence</h3>' + contextHtml(a.serialized, cmp.byteOffset, 120);
+    h += '<h3>Request N+1, around the divergence</h3>' + contextHtml(b.serialized, cmp.byteOffset, 120);
+    h += '<p class="sub small">The red rule marks the exact character where the two renders stop matching. Text to its left is common to both.</p>';
+
+    if (diag) {
+      h += '<hr>';
+      h += '<h3>Diagnosis: ' + escapeHtml(diag.title) + '</h3>';
+      h += '<p class="small"><strong>' + escapeHtml(diag.line) + '</strong></p>';
+      h += '<p class="small">' + escapeHtml(diag.detail) + '</p>';
+      if (diag.evidence) {
+        h += '<pre class="code">' + escapeHtml(diag.evidence) + '</pre>';
+      }
+      h += noteHtml('good', '<p><strong>Fix.</strong> ' + escapeHtml(diag.fix) + '</p>');
+      if (diag.code === 'UNCLASSIFIED') {
+        h += noteHtml('warn', '<p>The tool does not recognise this pattern and is not going to invent a cause for it. The raw differing bytes are above.</p>');
+      }
+      reportLines.push('DIVERGENCE: block ' + cmp.blockIndex + ' (' + blockName(a) + '), byte offset ' + cmp.byteOffset + '. Cause: ' + diag.code + ' - ' + diag.title);
+    }
+
+    var later = laterDivergences(renderA.blocks, renderB.blocks, cmp.blockIndex, 25);
+    if (later.length) {
+      h += '<hr><h3>Additional independent divergences after the first</h3>';
+      h += '<p class="small">The first divergence is the one that matters for the cache, because everything after it is already a different prefix. These are listed so that fixing the first one does not just move the failure a few blocks along.</p>';
+      var rows = '';
+      for (var i = 0; i < later.length; i++) {
+        rows += '<tr><td class="num">' + later[i].index + '</td><td>' + escapeHtml(later[i].segment + (later[i].role ? ' / ' + later[i].role : '') + ' / ' + later[i].type) + '</td><td class="num">' + fmtInt(later[i].byteOffset) + '</td><td class="mono">' + escapeHtml(later[i].label || '') + '</td></tr>';
+      }
+      h += '<div class="tablewrap"><table><thead><tr><th class="num">Block</th><th>Segment / type</th><th class="num">Byte offset</th><th>Path</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      reportLines.push('Additional divergent blocks: ' + later.length);
+    }
+
+    return panel('Divergence', zoneExact(), h, 'divergence');
+  }
+
+  function breakpointPanel(auditA, auditB, model, bp, reportLines) {
+    var h = '<p class="small">Positions and counts below are exact. The token figures are estimates and the verdicts compare those estimates against the model floor in the rates block, so both zones are in play here and are labelled per column.</p>';
+    h += noteHtml('rates', '<p><strong>Token method.</strong> Every token figure on this page is a character heuristic: characters divided by a band of <strong>' + fmtNum(bp.min, 2) + ' to ' + fmtNum(bp.max, 2) + ' characters per token</strong>, rendered as a range and never as a point value. This is not the Claude tokenizer, and it is not <code>tiktoken</code> - OpenAI tokenizers are wrong for Claude and this tool deliberately does not ship one. Anything that lands on the floor renders BORDERLINE; confirm those with the <code>count_tokens</code> endpoint.</p>');
+
+    h += renderAudit('Request N', auditA, model);
+    if (auditB) h += renderAudit('Request N+1', auditB, model);
+
+    var flip = '<h3 style="margin-top:14px">The same prefix on every model in the rates table</h3>';
+    flip += '<p class="small">The minimum cacheable prefix does not track recency or tier across model families. The consequence, not the adjective, is what matters: the same prefix can cache on one model and silently not cache on another that looks comparable. Switch the model selector above and the verdict flips with no other change.</p>';
+    var models = ratesModels();
+    var keys = Object.keys(models);
+    var first = auditA.markers.length ? auditA.markers[0] : null;
+    if (first) {
+      var rows = '';
+      for (var i = 0; i < keys.length; i++) {
+        var m = lookupGet(models, keys[i]);
+        var floor = safeNum(m && m.min_cacheable_tokens, 0);
+        var v = verdictAgainstFloor(first.estimate, floor);
+        rows += '<tr><td>' + escapeHtml((m && m.label) || keys[i]) + '</td><td class="mono">' + escapeHtml(keys[i]) + '</td><td class="num">' + fmtInt(floor) + '</td><td>' + verdictChip(v.verdict) + '</td></tr>';
+      }
+      flip += '<p class="small">Evaluated for the first breakpoint in request N (block ' + fmtInt(first.blockIndex) + ', estimated ' + fmtInt(first.estimate.low) + ' to ' + fmtInt(first.estimate.high) + ' tokens).</p>';
+      flip += '<div class="tablewrap"><table><thead><tr><th>Model</th><th>Key</th><th class="num">Minimum prefix</th><th>Verdict</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      flip += '<p class="sub small">Floors come from the rates block, stamped ' + escapeHtml(ratesDate()) + '. The documented minimums apply on every platform where each model is available.</p>';
+      flip += '<p class="sub small">The documented floor table also covers four models this tool ships no price for, so they are not in the selector: Mythos Preview at 2,048, and Opus 4.1, Opus 4 and Sonnet 4 at 1,024. They are listed under <code>models_documented_elsewhere</code> in the rates block; add a full row there if you need one priced.</p>';
+    } else {
+      flip += noteHtml('warn', '<p>Request N has no explicit breakpoint, so there is no prefix to evaluate against the floors.</p>');
+    }
+    h += '<hr>' + flip;
+
+    reportLines.push('Breakpoints in N: ' + auditA.count + ' of ' + auditA.maxBreakpoints + (auditB ? ('; in N+1: ' + auditB.count) : ''));
+    return panel('Breakpoint legality audit', zoneExact() + zoneRates(), h, 'breakpoints');
+  }
+
+  function renderAudit(title, audit, model) {
+    var h = '<h3 style="margin-top:12px">' + escapeHtml(title) + '</h3>';
+    if (!audit.markers.length) {
+      h += '<p class="small">No explicit <code>cache_control</code> markers in this body.</p>';
+    } else {
+      var rows = '';
+      for (var i = 0; i < audit.markers.length; i++) {
+        var m = audit.markers[i];
+        var rel = m.relationToDivergence;
+        var relHtml = rel === 'before' ? '<span class="v v-pass">before divergence</span>'
+          : rel === 'at' ? '<span class="v v-fail">at divergence</span>'
+          : rel === 'after' ? '<span class="v v-fail">after divergence</span>'
+          : '<span class="v v-info">n/a</span>';
+        rows += '<tr>' +
+          '<td class="num">' + fmtInt(m.blockIndex) + '</td>' +
+          '<td>' + escapeHtml(m.segment + (m.role ? ' / ' + m.role : '') + ' / ' + m.type) + '<br><span class="sub mono">' + escapeHtml(m.label || '') + '</span></td>' +
+          '<td><span class="chip">' + escapeHtml(m.ttl || '5m') + '</span>' + (m.explicitTtl ? '' : '<br><span class="sub">default</span>') + '</td>' +
+          '<td class="num">' + fmtInt(m.prefixChars) + '</td>' +
+          '<td class="num">' + fmtInt(m.estimate.low) + ' to ' + fmtInt(m.estimate.high) + '</td>' +
+          '<td>' + verdictChip(m.verdict) + '</td>' +
+          '<td>' + relHtml + '</td>' +
+          '</tr>';
+      }
+      h += '<div class="tablewrap"><table><thead><tr>' +
+        '<th class="num">Block</th><th>Segment / type</th><th>TTL</th>' +
+        '<th class="num">Prefix chars <span class="sub">(exact)</span></th>' +
+        '<th class="num">Prefix tokens <span class="sub">(estimate)</span></th>' +
+        '<th>vs floor ' + fmtInt(model.floor) + '</th><th>Position</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+      for (var j = 0; j < audit.markers.length; j++) {
+        if (audit.markers[j].verdict !== 'PASS') {
+          h += noteHtml(audit.markers[j].verdict === 'FAIL' ? 'bad' : 'warn',
+            '<p><strong>Block ' + fmtInt(audit.markers[j].blockIndex) + ': ' + escapeHtml(audit.markers[j].verdict) + '.</strong> ' + escapeHtml(audit.markers[j].reason) + '</p>');
+        }
+        if (audit.markers[j].relationToDivergence === 'after' || audit.markers[j].relationToDivergence === 'at') {
+          h += noteHtml('bad', '<p><strong>Block ' + fmtInt(audit.markers[j].blockIndex) + ' sits at or after the divergence point.</strong> A breakpoint whose prefix already contains the divergence can never produce a read: the prefix hash differs, so there is nothing to match. It writes a fresh entry every request and reads nothing.</p>');
+        }
+      }
+    }
+    for (var k = 0; k < audit.issues.length; k++) {
+      h += noteHtml(audit.issues[k].level, '<p>' + escapeHtml(audit.issues[k].text) + '</p>');
+    }
+    return h;
+  }
+
+  function lookbackPanel(auditA, auditB, divergenceIndex, reportLines, single) {
+    var w = lookbackWindow();
+    var h = '<p class="small">Each breakpoint walks backward at most <strong>' + fmtInt(w) + ' positions</strong>, counting the breakpoint itself as the first, looking for an entry a previous request actually wrote. It is looking for prior writes, not for stable content. If nothing matches inside that window, checking stops. This is the trap that silently kills agentic turns which append many tool_use and tool_result blocks in a single turn.</p>';
+
+    if (single || !auditB) {
+      if (!auditA.markers.length) {
+        h += noteHtml('warn', '<p>No breakpoint in this body, so there is no window to describe.</p>');
+        return panel('20-block lookback window', zoneExact() + zoneRates(), h, 'lookback');
+      }
+      var last = auditA.markers[auditA.markers.length - 1];
+      var lb0 = lookbackCheck(last.blockIndex, null, w);
+      h += '<div class="algebra">breakpoint at block ' + fmtInt(lb0.top) + '\nwindow covers blocks ' + fmtInt(lb0.top) + ' down to ' + fmtInt(lb0.bottom) + ' (' + fmtInt(lb0.window) + ' positions, breakpoint counted as the first)</div>';
+      h += noteHtml('info', '<p>In single request mode there is no previous request to have written an entry, so no hit or miss can be determined. What this does tell you: any entry written by an earlier request must sit at block ' + fmtInt(lb0.bottom) + ' or later to be reachable from this breakpoint. If your previous turn ended more than ' + fmtInt(lb0.window) + ' blocks back, add an intermediate breakpoint roughly every ' + fmtInt(lb0.suggestedInterval) + ' blocks so a write accumulates inside the window before you need it.</p>');
+      return panel('20-block lookback window', zoneExact() + zoneRates(), h, 'lookback');
+    }
+
+    if (!auditB.markers.length) {
+      h += noteHtml('warn', '<p>Request N+1 has no explicit breakpoint, so there is no lookback window to evaluate.</p>');
+      return panel('20-block lookback window', zoneExact() + zoneRates(), h, 'lookback');
+    }
+    if (!auditA.markers.length) {
+      h += noteHtml('warn', '<p>Request N wrote no explicit cache entry, so there is nothing for request N+1 to find.</p>');
+      return panel('20-block lookback window', zoneExact() + zoneRates(), h, 'lookback');
+    }
+
+    var bpB = auditB.markers[auditB.markers.length - 1];
+    var candidates = [];
+    var i;
+    for (i = 0; i < auditA.markers.length; i++) candidates.push(auditA.markers[i].blockIndex);
+    for (i = 0; i < auditB.markers.length - 1; i++) candidates.push(auditB.markers[i].blockIndex);
+    candidates.sort(function (x, y) { return x - y; });
+    var nearest = null;
+    for (i = 0; i < candidates.length; i++) {
+      if (candidates[i] <= bpB.blockIndex) nearest = candidates[i];
+    }
+
+    var lb = lookbackCheck(bpB.blockIndex, nearest, w);
+    h += '<div class="algebra">breakpoint at block ' + fmtInt(lb.top) +
+      '\nnearest prior entry at block ' + (lb.hasPrior ? fmtInt(lb.priorEntryIndex) : 'none') +
+      '\nwindow covers blocks ' + fmtInt(lb.top) + ' down to ' + fmtInt(lb.bottom) +
+      '\nentry is ' + (lb.covered ? 'INSIDE the window' : (fmtInt(lb.positionsOutside) + ' position' + (lb.positionsOutside === 1 ? '' : 's') + ' OUTSIDE the window')) + '</div>';
+
+    if (!lb.covered) {
+      h += noteHtml('bad', '<p><strong>Lookback miss.</strong> The breakpoint at block ' + fmtInt(lb.top) + ' checks ' + fmtInt(lb.window) + ' positions, reaching down to block ' + fmtInt(lb.bottom) + '. The nearest entry a previous request wrote is at block ' + fmtInt(lb.priorEntryIndex) + ', which is ' + fmtInt(lb.positionsOutside) + ' position' + (lb.positionsOutside === 1 ? '' : 's') + ' below the bottom of the window. Nothing is found, so this request pays a full cache write and reads nothing - with no error and no warning.</p>' +
+        '<p style="margin-top:6px"><strong>Fix.</strong> Add an intermediate breakpoint roughly every ' + fmtInt(lb.suggestedInterval) + ' blocks, from the start rather than after you notice the miss. A write has to accumulate at that position on an earlier request before a later lookback can find it. You have ' + fmtInt(Math.max(0, auditB.maxBreakpoints - auditB.count)) + ' unused breakpoint slot' + (Math.max(0, auditB.maxBreakpoints - auditB.count) === 1 ? '' : 's') + ' in request N+1 to spend on this.</p>');
+      reportLines.push('LOOKBACK: MISS. Breakpoint at block ' + lb.top + ', prior entry at block ' + lb.priorEntryIndex + ', ' + lb.positionsOutside + ' positions outside.');
+    } else {
+      h += noteHtml('good', '<p><strong>Inside the window.</strong> The nearest prior entry at block ' + fmtInt(lb.priorEntryIndex) + ' falls within the ' + fmtInt(lb.window) + ' positions this breakpoint checks, so the lookback is not the reason for a miss here.</p>');
+      reportLines.push('LOOKBACK: entry at block ' + lb.priorEntryIndex + ' is inside the window.');
+    }
+
+    if (divergenceIndex >= 0 && lb.hasPrior && divergenceIndex <= lb.priorEntryIndex) {
+      h += noteHtml('warn', '<p><strong>Read this together with the divergence.</strong> The prefix already diverges at block ' + fmtInt(divergenceIndex) + ', which is at or before the entry at block ' + fmtInt(lb.priorEntryIndex) + '. Even if that entry were inside the window, the prefix hash would not match it. Fix the divergence first; the lookback geometry only starts to matter once the bytes line up.</p>');
+    }
+    return panel('20-block lookback window', zoneExact() + zoneRates(), h, 'lookback');
+  }
+
+  function ttlPanel(clock, ttlKey, reportLines) {
+    var h = '<p class="small">The documented rule is the one everyone gets wrong: <strong>the lifetime is measured from the start of the request that writes or reads the entry, not from the end of its response.</strong> Time spent generating counts against the lifetime. On a model whose hard tasks run for minutes, the agent&#39;s own latency can kill its cache before the response has even finished streaming.</p>';
+
+    var pctTtl = clock.pctTtl;
+    var pctStream = clock.pctStream;
+    var pctNext = clock.pctNext;
+    h += '<div class="tl">' +
+      '<div class="tlbar" role="img" aria-label="Timeline: entry created at the start of request N, TTL window, request N streaming duration, and the start of request N+1.">' +
+      '<div class="tl-ttl" style="width:' + fmtNum(pctTtl, 3) + '%"></div>' +
+      '<div class="tl-stream" style="width:' + fmtNum(pctStream, 3) + '%"></div>' +
+      '<div class="tl-next" style="left:' + fmtNum(Math.min(99.7, pctNext), 3) + '%"></div>' +
+      '</div>' +
+      '<div class="tllabels"><span>0s (request N starts, entry created)</span><span>' + escapeHtml(fmtSeconds(clock.span)) + '</span></div>' +
+      '<div class="tlkey">' +
+      '<span><i class="sw ttl"></i>TTL window (' + escapeHtml(fmtSeconds(clock.ttlSeconds)) + ')</span>' +
+      '<span><i class="sw stream"></i>Request N streaming (' + escapeHtml(fmtSeconds(clock.streamSeconds)) + ')</span>' +
+      '<span><i class="sw next"></i>Request N+1 starts (' + escapeHtml(fmtSeconds(clock.gapSeconds)) + ' after N started)</span>' +
+      '</div></div>';
+
+    h += '<div class="grid3" style="margin-top:12px">';
+    h += statTile('TTL tier', escapeHtml(fmtSeconds(clock.ttlSeconds)) + ' (' + fmtInt(clock.ttlSeconds) + 's)');
+    h += statTile('N+1 starts after N completes', escapeHtml(fmtSeconds(clock.idleAfterResponse)));
+    h += statTile('Margin at N+1 start', escapeHtml(fmtSeconds(clock.marginSeconds)));
+    h += '</div>';
+
+    h += '<div class="algebra">entry created at request N start (t = 0)\n' +
+      'TTL expires at t = ' + escapeHtml(fmtSeconds(clock.ttlSeconds)) + '\n' +
+      'request N finishes streaming at t = ' + escapeHtml(fmtSeconds(clock.streamSeconds)) + '\n' +
+      'request N+1 starts at t = ' + escapeHtml(fmtSeconds(clock.gapSeconds)) + '\n' +
+      'margin = TTL - (N start to N+1 start) = ' + escapeHtml(fmtSeconds(clock.marginSeconds)) + '</div>';
+
+    if (clock.deadBeforeResponseComplete) {
+      h += noteHtml('bad', '<p><strong>The entry was already dead before request N finished responding.</strong> Request N streamed for ' + escapeHtml(fmtSeconds(clock.streamSeconds)) + ', which is longer than the ' + escapeHtml(fmtSeconds(clock.ttlSeconds)) + ' lifetime. Because the clock starts when the request starts and not when the response ends, the entry expired ' + escapeHtml(fmtSeconds(clock.streamSeconds - clock.ttlSeconds)) + ' before the last token came back. <strong>No follow-up request can ever hit this entry on this tier</strong>, no matter how quickly it is sent - not even one sent in the same millisecond the response completed. This is not a race you can win by being faster.</p>' +
+        '<p style="margin-top:6px"><strong>Fix.</strong> Move to the 1-hour tier and re-read the economics panel: the write costs more per request, so the break-even count rises, and whether that trade is worth it depends entirely on how many requests share the prefix. Switch the tier radio above to see the changed numbers.</p>');
+      reportLines.push('TTL: entry died ' + fmtSeconds(clock.streamSeconds - clock.ttlSeconds) + ' before request N finished streaming. No follow-up can hit it on the ' + ttlKey + ' tier.');
+    } else if (!clock.aliveAtNextStart) {
+      h += noteHtml('bad', '<p><strong>Expired before request N+1 started.</strong> The entry lived ' + escapeHtml(fmtSeconds(clock.ttlSeconds)) + ' from the start of request N, and request N+1 started ' + escapeHtml(fmtSeconds(clock.gapSeconds)) + ' later - ' + escapeHtml(fmtSeconds(Math.abs(clock.marginSeconds))) + ' too late. Note how much of that budget the response itself consumed: ' + escapeHtml(fmtSeconds(clock.streamSeconds)) + ' of the ' + escapeHtml(fmtSeconds(clock.ttlSeconds)) + ' was gone before your code got control back, leaving only ' + escapeHtml(fmtSeconds(clock.remainingWhenResponseCompletes)) + ' of real thinking time.</p>' +
+        '<p style="margin-top:6px"><strong>Fix.</strong> Either shorten the gap, or move to the 1-hour tier and check the break-even count in the economics panel.</p>');
+      reportLines.push('TTL: expired ' + fmtSeconds(Math.abs(clock.marginSeconds)) + ' before request N+1 started.');
+    } else if (clock.ttlSeconds <= 0) {
+      h += noteHtml('warn', '<p>No TTL duration is configured for this tier in the rates block, so no verdict could be computed.</p>');
+    } else {
+      h += noteHtml('good', '<p><strong>Still alive.</strong> Request N+1 starts ' + escapeHtml(fmtSeconds(clock.gapSeconds)) + ' after request N started, inside the ' + escapeHtml(fmtSeconds(clock.ttlSeconds)) + ' lifetime, with ' + escapeHtml(fmtSeconds(clock.marginSeconds)) + ' of margin. The TTL is not why you are missing.</p>' +
+        (clock.remainingWhenResponseCompletes < clock.ttlSeconds * 0.34 && clock.streamSeconds > 0
+          ? '<p style="margin-top:6px"><strong>Watch this though.</strong> Request N spent ' + escapeHtml(fmtSeconds(clock.streamSeconds)) + ' of its own lifetime streaming, leaving only ' + escapeHtml(fmtSeconds(clock.remainingWhenResponseCompletes)) + ' after the response completed. A slightly harder task or a slightly higher effort setting pushes this over the edge with no code change.</p>'
+          : ''));
+      reportLines.push('TTL: alive at request N+1 start with ' + fmtSeconds(clock.marginSeconds) + ' of margin.');
+    }
+
+    h += noteHtml('info', '<p>Related and also documented: a cache entry only becomes available <strong>after the first response begins</strong>. Fanning out N identical requests in parallel means none of them can read what the others are still writing, so every one pays full price. Send one, wait for the first streamed token, then fire the rest.</p>');
+    return panel('TTL clock', zoneExact() + zoneRates(), h, 'ttl');
+  }
+
+  /* Both return a band, never a point value. */
+  function pickPrefixBand(audit, render, bp) {
+    if (audit.markers.length) return audit.markers[0].estimate;
+    return estimateTokens(audit.totalChars, bp);
+  }
+  function pickSuffixBand(audit, render, bp) {
+    if (!audit.markers.length) return estimateTokens(0, bp);
+    var last = audit.markers[audit.markers.length - 1];
+    var suffixChars = Math.max(0, audit.totalChars - last.prefixChars);
+    return estimateTokens(suffixChars, bp);
+  }
+  function bandText(est) {
+    return fmtInt(est.low) + ' to ' + fmtInt(est.high) + ' tokens';
+  }
+
+  function economicsPanel(prefixBand, suffixBand, ttlKey, model, reportLines) {
+    var prefixTokens = prefixBand.mid;
+    var suffixTokens = suffixBand.mid;
+    var w = writeMultiplier(ttlKey);
+    var r = readMultiplier();
+    var be = breakEvenRequests(w, r);
+    var price = model.price;
+
+    var h = '<p class="small">This whole panel is downstream of the rates block. The break-even count below is <strong>solved from the multipliers</strong> rather than written into the code, so if a multiplier ever changes, edit it above and the derivation still holds.</p>';
+
+    h += '<div class="algebra">' +
+      'cost with no caching   = N x prefix x 1.0            + N x suffix x 1.0\n' +
+      'cost with caching      = prefix x W + (N-1) x prefix x R + N x suffix x 1.0\n\n' +
+      'W = write multiplier (' + escapeHtml(ttlKey) + ' tier) = ' + escapeHtml(fmtNum(w, 4)) + '\n' +
+      'R = read multiplier                     = ' + escapeHtml(fmtNum(r, 4)) + '\n\n' +
+      'The suffix term is identical on both sides, so it cancels.\n' +
+      'Caching wins when   W + (N-1)R < N\n' +
+      '            i.e.    N > (W - R) / (1 - R)\n' +
+      '                    N > (' + escapeHtml(fmtNum(w, 4)) + ' - ' + escapeHtml(fmtNum(r, 4)) + ') / (1 - ' + escapeHtml(fmtNum(r, 4)) + ')\n' +
+      (be.ok
+        ? ('                    N > ' + escapeHtml(fmtNum(be.threshold, 4)) + '\n\n' +
+           'Break-even at N = ' + fmtInt(be.n) + ' requests sharing the prefix.')
+        : ('\nNo break-even: ' + escapeHtml(be.reason))) +
+      '</div>';
+
+    if (be.ok) {
+      h += noteHtml(be.n <= 2 ? 'good' : 'info', '<p><strong>Break-even on the ' + escapeHtml(ttlKey) + ' tier is ' + fmtInt(be.n) + ' request' + (be.n === 1 ? '' : 's') + ' sharing the prefix.</strong> At fewer than that, caching costs you money. Try the other tier radio: a higher write multiplier moves this number up, which is the actual reason a longer TTL is not free.</p>');
+      reportLines.push('Break-even on ' + ttlKey + ': N = ' + be.n + ' (threshold ' + fmtNum(be.threshold, 4) + ')');
+    } else {
+      h += noteHtml('bad', '<p>' + escapeHtml(be.reason) + '</p>');
+    }
+
+    h += '<div class="grid3" style="margin-top:12px">';
+    h += statTile('Cacheable prefix (estimated band)', escapeHtml(bandText(prefixBand)));
+    h += statTile('Uncached suffix (estimated band)', escapeHtml(bandText(suffixBand)));
+    h += statTile('Base input price', fmtUsd(price) + ' / 1M tokens');
+    h += '</div>';
+    h += noteHtml('rates', '<p><strong>Both figures above are bands, not counts.</strong> They come from the same character heuristic as every other token number here (' + fmtNum(prefixBand.minCharsPerToken, 2) + ' to ' + fmtNum(prefixBand.maxCharsPerToken, 2) + ' characters per token). The cost table below has to pick one number per row, so it uses the <strong>midpoint</strong> of each band - ' + fmtInt(prefixTokens) + ' prefix and ' + fmtInt(suffixTokens) + ' suffix tokens. Read the money as scaling with the band: at the low end of the prefix band the figures are roughly ' + fmtNum(prefixTokens > 0 ? prefixBand.low / prefixTokens : 1, 2) + 'x these, at the high end roughly ' + fmtNum(prefixTokens > 0 ? prefixBand.high / prefixTokens : 1, 2) + 'x. The break-even count above is unaffected: it depends only on the multipliers, not on the token count.</p>');
+    if (model.note) h += '<p class="sub small">' + escapeHtml(model.note) + '</p>';
+
+    var ns = [1, 2, 3, 5, 10, 50];
+    var calcs = [];
+    var allVals = [];
+    for (var i = 0; i < ns.length; i++) {
+      var e = cacheEconomics({
+        prefixTokens: prefixTokens, suffixTokens: suffixTokens, requests: ns[i],
+        writeMultiplier: w, readMultiplier: r, pricePerMTok: price
+      });
+      calcs.push(e);
+      allVals.push(e.uncachedUsd, e.cachedUsd, e.deltaUsd);
+    }
+    var places = usdPlacesFor(allVals);
+    var rows = '';
+    for (var q = 0; q < calcs.length; q++) {
+      var c = calcs[q];
+      var delta = c.deltaUsd;
+      var cls = (delta === null) ? '' : (delta > 0 ? 'style="color:var(--good)"' : (delta < 0 ? 'style="color:var(--bad)"' : ''));
+      rows += '<tr>' +
+        '<td class="num">' + ns[q] + '</td>' +
+        '<td class="num">' + (c.uncachedUsd === null ? '-' : fmtUsd(c.uncachedUsd, places)) + '</td>' +
+        '<td class="num">' + (c.cachedUsd === null ? '-' : fmtUsd(c.cachedUsd, places)) + '</td>' +
+        '<td class="num" ' + cls + '>' + (delta === null ? '-' : fmtUsd(delta, places)) + '</td>' +
+        '</tr>';
+    }
+    h += '<h3 style="margin-top:14px">Net cost across N requests sharing this prefix</h3>';
+    h += '<div class="tablewrap"><table><thead><tr><th class="num">N</th><th class="num">No caching</th><th class="num">With caching</th><th class="num">Net saved</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    h += '<p class="sub small">Input-token cost only. Output tokens are unaffected by caching and are not modelled here. A negative net saved means caching cost you money at that request count.</p>';
+    h += noteHtml('warn', '<p>No headline savings percentage appears here on purpose. A percentage without a request count is not something you can act on, and it hides the case that actually bites teams: at N below break-even, caching is a net loss.</p>');
+    return panel('Economics', zoneRates(), h, 'economics');
+  }
+
+  function itpmPanel(model, reportLines) {
+    var limit = Math.max(0, safeNum($('itpmLimit').value, 0));
+    var h = '<p class="small">Cache reads do not count toward input-tokens-per-minute on most models, so a hit rate is a <strong>throughput multiplier</strong> as well as a discount. That second effect is usually the one nobody has budgeted for.</p>';
+    h += '<div class="algebra">effective ITPM = limit / (1 - hit_rate)</div>';
+
+    var rates5 = [0, 0.25, 0.5, 0.8, 0.9, 0.95];
+    var rows = '';
+    for (var i = 0; i < rates5.length; i++) {
+      var e = effectiveItpm(limit, rates5[i], model.countsCacheReads);
+      rows += '<tr><td class="num">' + fmtNum(rates5[i] * 100, 0) + '%</td>' +
+        '<td class="num">' + (e.effective === null ? '-' : fmtInt(e.effective)) + '</td>' +
+        '<td class="num">' + (e.multiplier === null ? '-' : fmtNum(e.multiplier, 2) + 'x') + '</td></tr>';
+    }
+    h += '<div class="tablewrap"><table><thead><tr><th class="num">Cache hit rate</th><th class="num">Effective input tokens per minute</th><th class="num">Multiplier</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+
+    if (model.countsCacheReads) {
+      h += noteHtml('bad', '<p><strong>' + escapeHtml(model.label) + ' is the documented exception.</strong> This model counts <code>cache_read_input_tokens</code> toward the ITPM limit, so on this model a cache hit is a price discount but <strong>not</strong> a throughput multiplier. The table above therefore shows no multiplier at all. Every other model in the rates block excludes cache reads from ITPM.</p>');
+    } else {
+      h += noteHtml('good', '<p>On this model, <code>cache_read_input_tokens</code> do not count toward ITPM. What does count is <code>input_tokens</code> plus <code>cache_creation_input_tokens</code>. One model in the rates block is marked as an exception that does count cache reads; switch to it in the model selector to see the difference.</p>');
+    }
+
+    h += noteHtml('warn', '<p><strong>The field trap.</strong> <code>input_tokens</code> in the usage object means <em>only the tokens after the last cache breakpoint</em>. It is not your prompt size. A team that graphs <code>input_tokens</code> alone will under-count their real prompt by however much they successfully cached - which is to say, the better their caching gets, the more wrong their dashboard becomes. Total input is <code>cache_read_input_tokens + cache_creation_input_tokens + input_tokens</code>.</p>');
+    reportLines.push('ITPM limit ' + fmtInt(limit) + (model.countsCacheReads ? ' (this model counts cache reads toward ITPM)' : ' (cache reads excluded from ITPM)'));
+    return panel('Throughput side effect (ITPM)', zoneRates(), h, 'itpm');
+  }
+
+  function invalidatorPanel(renderA, renderB, single, reportLines) {
+    var h = '<p class="small">Each body is scanned independently for content that changes per request, restricted to <code>tools</code> and <code>system</code> - that is, everything ahead of the messages segment. That is where a value nobody thinks of as dynamic quietly poisons a prefix that is otherwise perfectly stable. This scan works on a single body, so it is useful even when you only have one request to look at.</p>';
+    h += renderScan('Request N', scanInvalidators(renderA.blocks, 200));
+    if (!single && renderB) h += renderScan('Request N+1', scanInvalidators(renderB.blocks, 200));
+    h += noteHtml('info', '<p>A hit here is a <strong>suspect, not a verdict</strong>. A fixed release date or a version string will match these patterns and is perfectly safe to cache. What makes a value an invalidator is that it <em>changes between requests</em>, which is exactly what the divergence analysis above establishes and this scan cannot.</p>');
+    return panel('Silent invalidator scan', zoneExact(), h, 'scan');
+  }
+
+  function renderScan(title, scan) {
+    var h = '<h3 style="margin-top:12px">' + escapeHtml(title) + '</h3>';
+    if (!scan.findings.length) {
+      h += '<p class="small">Nothing matched in <code>tools</code> or <code>system</code>. No dates, timestamps, UUIDs, identifiers or counters were found ahead of the messages segment.</p>';
+      return h;
+    }
+    var rows = '';
+    for (var i = 0; i < scan.findings.length; i++) {
+      var f = scan.findings[i];
+      rows += '<tr><td class="num">' + fmtInt(f.blockIndex) + '</td><td>' + escapeHtml(f.segment) + '<br><span class="sub mono">' + escapeHtml(f.label || '') + '</span></td><td>' + escapeHtml(f.what) + '</td><td class="num">' + fmtInt(f.offset) + '</td><td class="mono" style="word-break:break-all">' + escapeHtml(f.sample) + '</td></tr>';
+    }
+    h += '<div class="tablewrap"><table><thead><tr><th class="num">Block</th><th>Segment</th><th>Pattern</th><th class="num">Offset</th><th>Matched text</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    if (scan.truncated) h += '<p class="sub small">Result list capped.</p>';
+    return h;
+  }
+
+  /* ---------- auto detection ---------- */
+  function autoSelectModel(bodyA, bodyB) {
+    var models = ratesModels();
+    var ma = bodyA && typeof bodyA.model === 'string' ? bodyA.model : null;
+    var mb = bodyB && typeof bodyB.model === 'string' ? bodyB.model : null;
+    var pick = ma || mb;
+    if (!pick) { $('modelNote').textContent = 'No "model" field found, so the selection above was not changed.'; return; }
+    if (lookupHas(models, pick)) {
+      $('modelSel').value = pick;
+      toggleCustom();
+      var note = 'Auto-detected ' + pick + ' from the body.';
+      if (ma && mb && ma !== mb) note += ' The two bodies name different models, which is itself a finding: cache entries are scoped to a model.';
+      $('modelNote').textContent = note;
+    } else {
+      $('modelSel').value = '__custom';
+      toggleCustom();
+      $('modelNote').textContent = 'The body names "' + pick + '", which is not in the rates block. Switched to custom - set the floor yourself, or add the model to the rates block below.';
+    }
+  }
+
+  function autoSelectTtl(renderA, renderB) {
+    var found = null;
+    var scan = function (r) {
+      if (!r) return;
+      for (var i = 0; i < r.blocks.length; i++) {
+        if (r.blocks[i].hasCacheControl && r.blocks[i].explicitTtl) {
+          if (r.blocks[i].ttl === '1h') found = '1h';
+          else if (!found) found = r.blocks[i].ttl;
+        }
+      }
+      if (!found && r.topLevel && r.topLevel.present && r.topLevel.explicitTtl) found = r.topLevel.ttl;
+    };
+    scan(renderA); scan(renderB);
+    if (found === '1h') { $('ttl1h').checked = true; $('ttlNote').textContent = 'Auto-detected a 1h cache_control.ttl in the body.'; }
+    else if (found === '5m') { $('ttl5m').checked = true; $('ttlNote').textContent = 'Auto-detected an explicit 5m cache_control.ttl in the body.'; }
+    else { $('ttlNote').textContent = 'No explicit cache_control.ttl found. Defaulting to the 5-minute tier, which is the documented default.'; }
+  }
+
+  function setStatus(text) { $('status').textContent = text; }
+
+  /* ---------- wiring ---------- */
+  function schedule() {
+    if (debounceTimer) window.clearTimeout(debounceTimer);
+    debounceTimer = window.setTimeout(function () {
+      try { analyse(); } catch (err) {
+        $('out').innerHTML = '<section class="panel">' + noteHtml('bad', '<p><strong>The analysis threw an error.</strong> This is a bug in the tool, not in your input. Details: ' + escapeHtml(err && err.message ? err.message : String(err)) + '</p>') + '</section>';
+        setStatus('Analysis failed.');
+      }
+    }, 220);
+  }
+
+  ['bodyA', 'bodyB', 'gapSec', 'streamSec', 'itpmLimit', 'customFloor', 'customPrice'].forEach(function (id) {
+    $(id).addEventListener('input', schedule);
+  });
+  /* The synthetic banner belongs to the sample only, so any hand edit drops it. */
+  ['bodyA', 'bodyB'].forEach(function (id) {
+    $(id).addEventListener('input', function () { $('sampleFlag').hidden = true; });
+  });
+  $('modelSel').addEventListener('change', function () { userTouchedModel = true; toggleCustom(); schedule(); });
+  $('ttl5m').addEventListener('change', function () { userTouchedTtl = true; schedule(); });
+  $('ttl1h').addEventListener('change', function () { userTouchedTtl = true; schedule(); });
+  $('singleMode').addEventListener('change', function () {
+    $('bWrap').hidden = $('singleMode').checked;
+    schedule();
+  });
+  $('ratesBox').addEventListener('input', function () { loadRatesFromBox(); schedule(); });
+  $('resetRates').addEventListener('click', function () {
+    rates = defaultRates();
+    writeRatesBox(rates);
+    loadRatesFromBox();
+    schedule();
+  });
+  $('runBtn').addEventListener('click', function () { schedule(); });
+  $('clearBtn').addEventListener('click', function () {
+    $('sampleFlag').hidden = true;
+    $('bodyA').value = '';
+    $('bodyB').value = '';
+    $('gapSec').value = '0';
+    $('streamSec').value = '0';
+    userTouchedModel = false;
+    userTouchedTtl = false;
+    $('modelNote').textContent = 'Auto-detected from the body model field when possible.';
+    schedule();
+  });
+  $('sampleBtn').addEventListener('click', function () {
+    var s = buildSampleBodies();
+    $('sampleFlag').hidden = false;
+    $('singleMode').checked = false;
+    $('bWrap').hidden = false;
+    $('bodyA').value = s.n;
+    $('bodyB').value = s.nPlus1;
+    $('gapSec').value = String(s.gapSeconds);
+    $('streamSec').value = String(s.streamSeconds);
+    $('itpmLimit').value = String(s.itpmLimit);
+    $('ttl5m').checked = true;
+    userTouchedModel = false;
+    userTouchedTtl = false;
+    setStatus('Synthetic sample loaded.');
+    schedule();
+    window.setTimeout(function () {
+      var el = document.getElementById('divergence');
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 400);
+  });
+
+  writeRatesBox(rates);
+  loadRatesFromBox();
+  try { analyse(); } catch (err) { setStatus('Analysis failed.'); }
+})();
+</script>
+</body>
+</html>

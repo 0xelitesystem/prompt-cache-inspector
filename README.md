@@ -2,9 +2,18 @@
 
 Paste two consecutive Anthropic request bodies and find the exact byte where your cached prefix broke, whether your breakpoints are legal, and whether caching pays for itself at your request rate.
 
-## Live demo
+**Live demo:** https://0xelitesystem.github.io/prompt-cache-inspector/
 
-https://0xelitesystem.github.io/prompt-cache-inspector/
+## Use
+
+1. Paste the raw JSON body of request N into the first box and request N+1 into the second, or tick "Single request mode" to audit one body.
+2. Pick the model, since it sets the minimum cacheable prefix, and fill in the timing fields if you want the TTL check.
+3. Click "Analyze" to see the first divergence, the breakpoint audit, the lookback and TTL verdicts, and the break-even table.
+4. Click "Load sample" first if you want to see every trap fire on a synthetic pair.
+
+## Why this exists
+
+Prompt caching fails without an error, and request bodies often carry proprietary prompts and customer data you should not paste into a hosted service. This is a single HTML file that does the whole diagnosis in your browser, with no tracking and no network path. MIT licensed.
 
 ## Features
 
@@ -102,9 +111,22 @@ Every one of those values lives in the editable rates block on the page rather t
 
 ## Privacy
 
-Everything runs locally in your browser. No request bodies, timings, rates or results leave the page. There is no backend, no analytics, no cookies, no local storage of your input, and no external dependencies - a single self-contained HTML file with all CSS and JavaScript inline. The only thing persisted is your light or dark theme preference.
+Everything runs locally in your browser. No request bodies, timings, rates or results leave the page. There is no backend, no analytics, no cookies, no local storage of your input, and no external dependencies - a single self-contained HTML file with all CSS and JavaScript inline. The only thing persisted is your light or dark theme preference. It is stored in localStorage under the key `pci-theme`.
 
 Request bodies routinely contain proprietary system prompts and customer data. That is precisely why this tool has no network path at all.
+
+## Run locally
+
+```
+git clone https://github.com/0xelitesystem/prompt-cache-inspector
+cd prompt-cache-inspector
+```
+
+Open `index.html` in a browser, or serve the folder with `python -m http.server` and visit http://localhost:8000.
+
+## Build
+
+No build step. It is a single `index.html` file.
 
 ## License
 
